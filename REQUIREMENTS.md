@@ -16,8 +16,9 @@ generate traffic — that is TSN-GEN's job.
 
 ### In scope (v1)
 
-- Protocols, as profiled by Milan v1.2: **MSRP**, **MVRP**, **MAAP**, and
-  **ATDECC** (**ADP**, **AECP**, **ACMP**).
+- Protocols, as profiled by Milan v1.2: **MSRP**, **MVRP**, **MAAP**,
+  **ATDECC** (**ADP**, **AECP**, **ACMP**), and **gPTP** (802.1AS, as a
+  passive observer — see OQ-9).
 - Analysis of pcap files (uploaded through the API or read from a mounted
   volume).
 - Multiple concurrent users observing the same trace.
@@ -27,7 +28,6 @@ generate traffic — that is TSN-GEN's job.
 ### Deferred to v2
 
 - Live capture on a network interface (BE-6, FE-7).
-- gPTP (802.1AS) decoding — candidate, not yet decided (see §9).
 
 ### Out of scope
 
@@ -211,8 +211,13 @@ Resolutions of the open questions from draft v0.2:
 
 ## 9. Remaining open questions
 
-- **OQ-9** — *gPTP:* the OQ-3 answer covered ADP/AECP but not gPTP — should
-  gPTP events appear on the timeline in v2?
+- **OQ-9** — *gPTP:* **resolved during implementation** — gPTP (802.1AS) is
+  decoded and reconstructed in v1 as a passive observer (grandmaster per
+  domain via Announce/BMCA, sync health with syncReceiptTimeout, per-port
+  role/asCapable/pdelay tracking), with cross-protocol correlation: ADP
+  entities get a live `gm_in_sync` check of their announced grandmaster, and
+  MSRP reservations carry a `gptp_sync` annotation. Folded into PA-1, PA-2
+  and PA-6. Real-capture validation showed 87% of Milan lab traffic is gPTP.
 - **OQ-10** — *Compression algorithm:* **resolved during implementation** —
   zlib deflate (RFC 1950) at `Z_BEST_SPEED`: lightweight on the backend and
   decompressed natively in the browser via `DecompressionStream("deflate")`,

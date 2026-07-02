@@ -17,6 +17,7 @@
   --accent: #6ab0f3;
   --accent-btn: #2a78d6;
 
+  --c-gptp: #2fa3a8;
   --c-msrp: #199e70;
   --c-mvrp: #3987e5;
   --c-maap: #d95926;
@@ -205,6 +206,7 @@ body {
 
 /* ── badges ──────────────────────────────────────────────── */
 
+.p-gptp  { --pc: var(--c-gptp); }
 .p-msrp  { --pc: var(--c-msrp); }
 .p-mvrp  { --pc: var(--c-mvrp); }
 .p-maap  { --pc: var(--c-maap); }

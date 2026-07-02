@@ -189,6 +189,122 @@ TEST(decode_aecp_entity_name) {
     CHECK(d.summary.find("Stage Box FOH") != std::string::npos);
 }
 
+namespace {
+
+Buf gptpHeader(uint8_t msgType, uint16_t msgLen, uint64_t clockId,
+               uint16_t seq, uint16_t flags = 0x0008, uint8_t domain = 0,
+               uint8_t logInterval = 0) {
+    Buf h;
+    h.u8(0x10 | msgType).u8(0x02).u16(msgLen).u8(domain).u8(0);
+    h.u16(flags).u64(0).u32(0);      // correction, messageTypeSpecific
+    h.u64(clockId).u16(1);           // sourcePortIdentity
+    h.u16(seq).u8(5).u8(logInterval);
+    return h;
+}
+
+} // namespace
+
+TEST(decode_gptp_sync_two_step) {
+    Buf pdu = gptpHeader(0x0, 44, kEntity, 1234, 0x0208, 0, 0xFD);
+    pdu.u48(0).u32(0); // originTimestamp (reserved, two-step)
+    DecodedPacket d;
+    decodePacket({ethFrame(0x0180c200000e, kTalkerMac, 0x88F7, pdu).b}, d);
+    CHECK(d.ok && d.interesting);
+    CHECK_EQ((int)d.proto, (int)Proto::GPTP);
+    CHECK_EQ(d.type, std::string("SYNC"));
+    CHECK_EQ(d.logicCtxs.size(), (size_t)1);
+    CHECK_EQ(d.logicCtxs[0].getServiceName(), std::string("8021as_gptp"));
+    CHECK_EQ(d.logicCtxs[0].at("two_step"), (uint64_t)1);
+    CHECK_EQ(d.logicCtxs[0].at("sequence_id"), (uint64_t)1234);
+    CHECK_EQ(d.logicCtxs[0].at("source_clock_id"), kEntity);
+    CHECK(d.summary.find("two-step") != std::string::npos);
+}
+
+TEST(decode_gptp_announce_with_path_trace_and_fcs) {
+    Buf body;
+    body.pad(10);                    // originTimestamp
+    body.u16(0).u8(0);               // utc offset, reserved
+    body.u8(200);                    // priority1
+    body.u8(248).u8(0x21).u16(0x436a); // clockQuality
+    body.u8(248);                    // priority2
+    body.u64(kEntity);               // grandmasterIdentity
+    body.u16(0);                     // stepsRemoved
+    body.u8(0xA0);                   // timeSource
+    body.u16(0x0008).u16(8).u64(kEntity); // path-trace TLV, 1 hop
+    Buf pdu = gptpHeader(0xB, (uint16_t)(34 + body.b.size()), kEntity, 7);
+    pdu.append(body);
+    pdu.u32(0xAAAAAAAA);             // trailing FCS — must not be parsed
+
+    DecodedPacket d;
+    decodePacket({ethFrame(0x0180c200000e, kTalkerMac, 0x88F7, pdu).b}, d);
+    CHECK(d.ok);
+    CHECK_EQ(d.type, std::string("ANNOUNCE"));
+    CHECK_EQ(d.logicCtxs[0].at("gm_identity"), kEntity);
+    CHECK_EQ(d.logicCtxs[0].at("gm_priority1"), (uint64_t)200);
+    CHECK_EQ(d.logicCtxs[0].at("path_trace_count"), (uint64_t)1);
+    std::string trace;
+    CHECK(d.logicCtxs[0].getBytes("path_trace", trace));
+    CHECK_EQ(trace, idStr(kEntity));
+}
+
+TEST(decode_gptp_follow_up_tlv) {
+    Buf body;
+    body.u48(1000).u32(500); // preciseOriginTimestamp
+    body.u16(0x0003).u16(28);
+    body.u48(0x0080C2000001ull);     // org id + subtype
+    body.u32(0x00000100);            // cumulativeScaledRateOffset
+    body.u16(8);                     // gmTimeBaseIndicator
+    body.pad(12 + 4);                // lastGmPhaseChange + freqChange
+    Buf pdu = gptpHeader(0x8, (uint16_t)(34 + body.b.size()), kEntity, 42);
+    pdu.append(body);
+    DecodedPacket d;
+    decodePacket({ethFrame(0x0180c200000e, kTalkerMac, 0x88F7, pdu).b}, d);
+    CHECK(d.ok);
+    CHECK_EQ(d.logicCtxs[0].at("has_as_tlv"), (uint64_t)1);
+    CHECK_EQ(d.logicCtxs[0].at("gm_time_base_indicator"), (uint64_t)8);
+    CHECK_EQ(d.logicCtxs[0].at("origin_seconds"), (uint64_t)1000);
+}
+
+TEST(decode_gptp_pdelay_resp) {
+    Buf body;
+    body.u48(2000).u32(999);         // requestReceiptTimestamp
+    body.u64(kEntity + 1).u16(1);    // requestingPortIdentity
+    Buf pdu = gptpHeader(0x3, (uint16_t)(34 + body.b.size()), kEntity, 88);
+    pdu.append(body);
+    DecodedPacket d;
+    decodePacket({ethFrame(0x0180c200000e, kTalkerMac, 0x88F7, pdu).b}, d);
+    CHECK(d.ok);
+    CHECK_EQ(d.type, std::string("PDELAY_RESP"));
+    CHECK_EQ(d.logicCtxs[0].at("requesting_clock_id"), kEntity + 1);
+    CHECK_EQ(d.logicCtxs[0].at("req_receipt_seconds"), (uint64_t)2000);
+}
+
+TEST(decode_gptp_malformed) {
+    // Bad PTP version.
+    Buf pdu = gptpHeader(0x0, 44, kEntity, 1);
+    pdu.b[15] = 0x05; // corrupt version nibble (byte 1 of the gPTP PDU)
+    DecodedPacket d;
+    Buf f;
+    f.u48(0x0180c200000e).u48(kTalkerMac).u16(0x88F7);
+    f.u8(0x10).u8(0x05).u16(44); // version 5
+    f.pad(40);
+    decodePacket({f.b}, d);
+    CHECK(d.interesting && !d.ok);
+    CHECK(d.error.find("version") != std::string::npos);
+
+    // TLV overruns messageLength.
+    Buf body;
+    body.pad(10).u16(0).u8(0).u8(200).u8(248).u8(0x21).u16(0).u8(248)
+        .u64(kEntity).u16(0).u8(0xA0);
+    body.u16(0x0008).u16(200); // claims 200 bytes, has none
+    Buf pdu2 = gptpHeader(0xB, (uint16_t)(34 + body.b.size()), kEntity, 7);
+    pdu2.append(body);
+    DecodedPacket d2;
+    decodePacket({ethFrame(0x0180c200000e, kTalkerMac, 0x88F7, pdu2).b}, d2);
+    CHECK(!d2.ok);
+    CHECK(d2.error.find("TLV") != std::string::npos);
+}
+
 TEST(decode_malformed_never_throws) {
     // Truncated ADP: claims cdl 56 but the frame ends early.
     Buf pdu = avtpCtrl(0xFA, 0, 31, 56);

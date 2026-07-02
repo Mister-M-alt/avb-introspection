@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: MIT
  *
  * Wire-format decoders for the Milan v1.2 protocol set (PA-1):
- * MSRP/MVRP (802.1Q MRP), MAAP (1722), ADP/AECP/ACMP (1722.1).
+ * MSRP/MVRP (802.1Q MRP), MAAP (1722), ADP/AECP/ACMP (1722.1),
+ * gPTP (802.1AS).
  *
  * One parse path serves two renderings:
  *  - analysis: named vars in VarLayerContext instances consumed by the
@@ -30,6 +31,7 @@ inline constexpr const char* kSvcMaap = "1722_maap";
 inline constexpr const char* kSvcAdp = "atdecc_adp";
 inline constexpr const char* kSvcAecp = "atdecc_aecp";
 inline constexpr const char* kSvcAcmp = "atdecc_acmp";
+inline constexpr const char* kSvcGptp = "8021as_gptp";
 
 struct DisplayField {
     std::string name, value;

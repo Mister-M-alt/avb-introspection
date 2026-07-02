@@ -20,6 +20,7 @@ On non-Ubuntu hosts set PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
 """
 import argparse
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -89,8 +90,28 @@ def run_tests(page, url):
     count = rows.count()  # table is virtualized: visible window only
     assert count > 10, f"expected >10 rendered event rows, got {count}"
 
-    # Timeline canvas rendered.
-    expect(page.locator(".session-view canvas").first).to_be_visible()
+    # Timeline canvas rendered; GPTP is a first-class protocol chip.
+    canvas = page.locator(".session-view canvas").first
+    expect(canvas).to_be_visible()
+    assert page.locator(".chip", has_text="GPTP").count() >= 1, \
+        "GPTP filter chip missing"
+
+    # Click-to-focus: zoom into the start of the capture, then select a late
+    # table row — the timeline viewport (exposed via data-t0/t1) must pan.
+    expect(canvas).to_have_attribute("data-t1", re.compile(r".+"),
+                                     timeout=10000)
+    canvas.hover(position={"x": 300, "y": 30})
+    page.mouse.wheel(0, -800)  # zoom in around the hovered time
+    page.wait_for_timeout(150)
+    t1_zoomed = float(canvas.get_attribute("data-t1"))
+    page.locator(".etable-body").evaluate("el => { el.scrollTop = el.scrollHeight; }")
+    page.wait_for_timeout(150)
+    page.locator(".erow").last.click()  # a late event, outside the zoom window
+    page.wait_for_timeout(150)
+    t1_after = float(canvas.get_attribute("data-t1"))
+    assert t1_after > t1_zoomed, \
+        f"timeline did not pan to the selected event " \
+        f"(t1 stayed at {t1_after} <= {t1_zoomed})"
 
     # ---- packet inspector -------------------------------------------------
     rows.first.click()

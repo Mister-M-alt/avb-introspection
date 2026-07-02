@@ -74,7 +74,7 @@ Response:
 ### GET /api/sessions/{id}
 
 Same object as above plus per-protocol counts:
-`"protocols": {"MSRP": 10, "MVRP": 4, "MAAP": 6, "ADP": 8, "AECP": 12, "ACMP": 10}`
+`"protocols": {"MSRP": 10, "MVRP": 4, "MAAP": 6, "ADP": 8, "AECP": 12, "ACMP": 10, "GPTP": 4719}`
 
 ### DELETE /api/sessions/{id}
 
@@ -82,8 +82,11 @@ Response: `{"ok": true}`
 
 ## Events
 
-Protocols are exactly: `"MSRP" | "MVRP" | "MAAP" | "ADP" | "AECP" | "ACMP"`.
+Protocols are exactly:
+`"MSRP" | "MVRP" | "MAAP" | "ADP" | "AECP" | "ACMP" | "GPTP"`.
 Event kinds are exactly: `"packet" | "transition" | "error"`.
+GPTP packet-event types: `SYNC, FOLLOW_UP, PDELAY_REQ, PDELAY_RESP,
+PDELAY_RESP_FOLLOW_UP, ANNOUNCE, SIGNALING`.
 
 An **event object**:
 ```json
@@ -162,7 +165,7 @@ Response: `{"ok": true}`. 400 when `markdown` is missing or not a string.
 Field `value`s are always strings, pre-formatted for display. Layer
 `service` names follow TSN-GEN conventions: `ethernet_mac_frame`,
 `mrp_msrp`, `mrp_mvrp`, `1722_avtp_control`, `1722_maap`, `atdecc_adp`,
-`atdecc_aecp`, `atdecc_acmp`.
+`atdecc_aecp`, `atdecc_acmp`, `8021as_gptp`.
 
 ## State
 
@@ -178,7 +181,10 @@ Every state object has a `history` array of
     "model_id": "0x001b92fffe112233", "state": "AVAILABLE",
     "last_seen": 10.2, "available_index": 3,
     "talker_sources": 2, "listener_sinks": 2,
-    "gptp_gm": "0x001b92fffe00aaaa", "history": [...]
+    "gptp_gm": "0x001b92fffe00aaaa", "gptp_domain": 0,
+    "gm_in_sync": "MATCH",   // announced GM vs the GM observed via gPTP:
+                             // MATCH | MISMATCH | UNKNOWN (live, PA-6)
+    "history": [...]
   }],
   "reservations": [{
     "stream_id": "0x001b92fffe000001:0001", "talker_mac": "00:1b:92:00:00:01",
@@ -188,6 +194,9 @@ Every state object has a `history` array of
     "state": "ESTABLISHED",
     "declaration": "ADVERTISE",             // or "FAILED"
     "failure_bridge": "", "failure_code": 0, // set when declaration == FAILED
+    "gptp_sync": "HEALTHY",   // live annotation from observed gPTP truth
+                              // (HEALTHY | LOST | UNKNOWN); NOT part of the
+                              // reservation state machine or its history
     "listeners": [{"mac": "00:1b:92:00:00:02", "state": "READY"}],
     "history": [...]
   }],
@@ -211,16 +220,60 @@ Every state object has a `history` array of
     "controller": "0x0000000000000099", "target": "0x001b92fffe000001",
     "commands": 5, "responses": 5, "timeouts": 0, "unsolicited": 1,
     "last": [{"sequence_id": 4, "command": "GET_NAME", "status": "SUCCESS", "rtt_ms": 1.2}]
-  }]
+  }],
+  "gptp": {
+    "domains": [{
+      "domain": 0,
+      "state": "GM_PRESENT",              // NO_GM | GM_PRESENT | GM_TIMED_OUT
+      "sync": "HEALTHY",                  // UNKNOWN | HEALTHY | LOST
+      "grandmaster": {
+        "clock_identity": "0x001b21fffeef2ad0",
+        "name": "Stage Box FOH",          // via AEM names when known
+        "priority1": 200, "priority2": 248,
+        "clock_class": 248, "clock_accuracy": "0x21",
+        "offset_scaled_log_variance": 17258,
+        "steps_removed": 0, "time_source": "INTERNAL_OSCILLATOR",
+        "current_utc_offset": 0
+      },
+      "sync_interval_ms": 125.0,          // declared logSyncInterval
+      "announce_interval_ms": 1000.0,
+      "last_sync": 243.31, "last_announce": 243.4, "last_sync_gap_ms": 126.3,
+      "sync_count": 1631, "follow_up_count": 1631, "unmatched_follow_ups": 0,
+      "announce_count": 209,
+      "cumulative_rate_offset_ppm": -3.2, // Follow_Up 802.1AS TLV
+      "gm_time_base_indicator": 8,
+      "path_trace": "0x001b21fffeef2ad0",
+      "history": [...]
+    }],
+    "ports": [{
+      "port": "0x001b21fffeef2ad0:1",
+      "clock_identity": "0x001b21fffeef2ad0", "port_number": 1,
+      "src_mac": "00:1b:21:ef:2a:d0", "name": "", "domain": 0,
+      "role": "MASTER",          // UNKNOWN | MASTER | SLAVE — inferred from a
+                                 // single tap point (Sync/Announce senders are
+                                 // MASTER, pdelay-only ports SLAVE)
+      "as_capable": "AS_CAPABLE",// UNKNOWN | AS_CAPABLE | NOT_AS_CAPABLE
+      "sync_sent": 1615, "announce_sent": 205, "signaling_sent": 0,
+      "pdelay": {
+        "initiated": 206, "complete": 204, "lost": 2, "consecutive_lost": 0,
+        "req_interval_ms": 1000.0,
+        "last_turnaround_us": 812.4,      // responder wire timestamps (exact)
+        "last_observed_gap_ms": 1.9       // capture-clock gap (approximate)
+      },
+      "history": [...]
+    }]
+  }
 }
 ```
 
 State value enums:
-- entity: `AVAILABLE | DEPARTING | TIMED_OUT`
-- reservation: `PENDING | ESTABLISHED | LISTENER_FAILED | TALKER_FAILED | WITHDRAWN`
+- entity: `AVAILABLE | DEPARTING | TIMED_OUT` (+ `gm_in_sync`: `MATCH | MISMATCH | UNKNOWN`)
+- reservation: `PENDING | ESTABLISHED | LISTENER_FAILED | TALKER_FAILED | WITHDRAWN` (+ `gptp_sync` annotation)
 - vlan: `REGISTERED | LEAVING | WITHDRAWN`
 - maap: `PROBING | ACQUIRED | DEFENDING | LOST`
 - connection: `DISCONNECTED | CONNECTING | CONNECTED | DISCONNECTING | FAILED`
+- gptp domain: `NO_GM | GM_PRESENT | GM_TIMED_OUT`, sync `UNKNOWN | HEALTHY | LOST`
+- gptp port: role `UNKNOWN | MASTER | SLAVE` (inferred), as_capable `UNKNOWN | AS_CAPABLE | NOT_AS_CAPABLE`
 
 ## Metrics (NF-2)
 

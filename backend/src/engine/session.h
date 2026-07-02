@@ -25,10 +25,10 @@
 
 namespace avb {
 
-/** The six protocol state machines of one session, from the registry. */
+/** The seven protocol state machines of one session, from the registry. */
 struct AnalysisState {
     SharedModel shared;
-    // Snapshot order defines the /state key order.
+    // Snapshot order defines the /state key order ("gptp" last).
     std::vector<std::pair<std::string, std::unique_ptr<ILogicModule>>> modules;
     std::unordered_map<std::string, AvbLogicBase*> byService;
 
@@ -36,7 +36,7 @@ struct AnalysisState {
         auto st = std::make_unique<AnalysisState>();
         static const char* kServices[] = {"atdecc_adp", "mrp_msrp", "mrp_mvrp",
                                           "1722_maap", "atdecc_acmp",
-                                          "atdecc_aecp"};
+                                          "atdecc_aecp", "8021as_gptp"};
         for (const char* svc : kServices) {
             auto mod = LogicRegistry::instance().create(svc);
             if (!mod) continue; // registry test covers this; keep running

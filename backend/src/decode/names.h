@@ -30,4 +30,10 @@ std::string descriptorTypeName(uint16_t t);
 std::string acmpMsgName(uint8_t t);
 std::string acmpStatusName(uint8_t status);
 
+// gPTP (IEEE 802.1AS)
+const char* gptpMsgName(uint8_t t);
+std::string gptpTimeSourceName(uint8_t t);
+std::string gptpClockClassName(uint8_t c);
+std::string gptpLogIntervalStr(uint8_t raw);
+
 } // namespace avb

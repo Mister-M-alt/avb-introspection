@@ -122,6 +122,69 @@ def maap(msg_type, req_start, req_count, conf_start="00:00:00:00:00:00",
     return avtp_ctrl(0xFE, msg_type, version, 16) + pdu
 
 
+# --- gPTP (IEEE 802.1AS) ----------------------------------------------------
+
+GPTP_MC = "01:80:c2:00:00:0e"  # nearest-bridge group (same MAC as MSRP_MC;
+ETYPE_GPTP = 0x88F7            # demux is by ethertype)
+
+
+def gptp_hdr(msg_type, body, clock, seq, port=1, domain=0, flags=0x0008,
+             log_interval=0, control=0, correction=0):
+    h = struct.pack(">BBHBB", 0x10 | msg_type, 0x02, 34 + len(body), domain, 0)
+    h += struct.pack(">HQ4x", flags, correction)
+    h += struct.pack(">QHHBB", clock, port, seq, control, log_interval & 0xFF)
+    return h + body
+
+
+def ptp_ts(sec, ns):
+    return struct.pack(">HII", (sec >> 32) & 0xFFFF, sec & 0xFFFFFFFF, ns)
+
+
+def gptp_sync(clock, seq, two_step=True, log_interval=-3):
+    flags = 0x0208 if two_step else 0x0008
+    return gptp_hdr(0x0, ptp_ts(0, 0), clock, seq, flags=flags,
+                    log_interval=log_interval)
+
+
+def gptp_follow_up(clock, seq, origin_sec=0, origin_ns=0, csro=0, tbi=1,
+                   log_interval=-3):
+    body = ptp_ts(origin_sec, origin_ns)
+    body += struct.pack(">HH", 0x0003, 28)          # org-extension TLV
+    body += bytes([0x00, 0x80, 0xC2, 0x00, 0x00, 0x01])
+    body += struct.pack(">iH", csro, tbi) + bytes(12) + struct.pack(">i", 0)
+    return gptp_hdr(0x8, body, clock, seq, control=2, log_interval=log_interval)
+
+
+def gptp_announce(clock, seq, gm, p1=248, clock_class=248, accuracy=0x21,
+                  variance=0x436A, p2=248, steps=0, tsrc=0xA0, path=None,
+                  log_interval=0):
+    body = bytes(10)                                 # originTimestamp
+    body += struct.pack(">hB", 0, 0)                 # utcOffset, reserved
+    body += struct.pack(">BBBH", p1, clock_class, accuracy, variance)
+    body += struct.pack(">BQHB", p2, gm, steps, tsrc)
+    path = [gm] if path is None else path
+    body += struct.pack(">HH", 0x0008, 8 * len(path))
+    body += b"".join(struct.pack(">Q", c) for c in path)
+    return gptp_hdr(0xB, body, clock, seq, control=5, log_interval=log_interval)
+
+
+def gptp_pdelay_req(clock, seq, log_interval=0):
+    return gptp_hdr(0x2, bytes(20), clock, seq, log_interval=log_interval)
+
+
+def gptp_pdelay_resp(resp_clock, seq, req_clock, req_port=1,
+                     receipt_sec=0, receipt_ns=0):
+    body = ptp_ts(receipt_sec, receipt_ns) + struct.pack(">QH", req_clock, req_port)
+    return gptp_hdr(0x3, body, resp_clock, seq, flags=0x0208,
+                    log_interval=0x7F)
+
+
+def gptp_pdelay_resp_fu(resp_clock, seq, req_clock, req_port=1,
+                        origin_sec=0, origin_ns=0):
+    body = ptp_ts(origin_sec, origin_ns) + struct.pack(">QH", req_clock, req_port)
+    return gptp_hdr(0xA, body, resp_clock, seq, log_interval=0x7F)
+
+
 # --- MRP ------------------------------------------------------------------
 
 NEW, JOININ, IN, JOINMT, MT, LV = range(6)
@@ -368,6 +431,164 @@ def scenario_acmp():
     write_pcap("testdata/acmp.pcap", pk)
 
 
+GPTP_A = E_TALKER    # clock identities double as entity ids so the
+GPTP_B = E_LISTENER  # GM <-> entity-name resolution is exercised
+
+
+def gptp_exchange(pk, t, req_clock, req_mac, resp_clock, resp_mac, seq,
+                  turnaround_ns=800_000):
+    """One complete pdelay exchange with an exact responder-clock turnaround."""
+    pk.append((t, eth(GPTP_MC, req_mac, ETYPE_GPTP,
+                      gptp_pdelay_req(req_clock, seq))))
+    pk.append((t + 0.001, eth(GPTP_MC, resp_mac, ETYPE_GPTP,
+                              gptp_pdelay_resp(resp_clock, seq, req_clock,
+                                               receipt_ns=1_000_000))))
+    pk.append((t + 0.002, eth(GPTP_MC, resp_mac, ETYPE_GPTP,
+                              gptp_pdelay_resp_fu(resp_clock, seq, req_clock,
+                                                  origin_ns=1_000_000
+                                                  + turnaround_ns))))
+
+
+def scenario_gptp_steady():
+    pk = []
+    seq_s = 0
+    # B probes the link first so its port exists before A becomes master.
+    gptp_exchange(pk, 0.02, GPTP_B, LISTENER_MAC, GPTP_A, TALKER_MAC, 1)
+    for i in range(3):  # announce each second
+        pk.append((0.05 + i, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                                 gptp_announce(GPTP_A, i, GPTP_A, p1=200))))
+    t = 0.1
+    while t < 3.0:  # two-step sync at 125 ms
+        seq_s += 1
+        pk.append((t, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                          gptp_sync(GPTP_A, seq_s))))
+        pk.append((t + 0.002, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                                  gptp_follow_up(GPTP_A, seq_s, csro=-7,
+                                                 tbi=3))))
+        t += 0.125
+    gptp_exchange(pk, 1.30, GPTP_B, LISTENER_MAC, GPTP_A, TALKER_MAC, 2)
+    gptp_exchange(pk, 1.50, GPTP_A, TALKER_MAC, GPTP_B, LISTENER_MAC, 10)
+    pk.sort(key=lambda x: x[0])
+    write_pcap("testdata/gptp_steady.pcap", pk)
+
+
+def scenario_gptp_gm_change():
+    pk = []
+    seq = 0
+    t = 0.0
+    while t < 2.0:  # A is GM (priority1 248)
+        if abs(t - round(t)) < 1e-9:
+            pk.append((t, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                              gptp_announce(GPTP_A, int(t), GPTP_A, p1=248))))
+        seq += 1
+        pk.append((t + 0.01, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                                 gptp_sync(GPTP_A, seq))))
+        t += 0.125
+    # B (priority1 200) wins BMCA and takes over Sync; A keeps pdelay only.
+    t = 2.0
+    while t < 4.0:
+        if abs(t - round(t)) < 1e-9:
+            pk.append((t, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                              gptp_announce(GPTP_B, int(t), GPTP_B, p1=200))))
+        seq += 1
+        pk.append((t + 0.01, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                                 gptp_sync(GPTP_B, seq))))
+        t += 0.125
+    gptp_exchange(pk, 3.0, GPTP_A, TALKER_MAC, GPTP_B, LISTENER_MAC, 50)
+    pk.sort(key=lambda x: x[0])
+    write_pcap("testdata/gptp_gm_change.pcap", pk)
+
+
+def scenario_gptp_sync_loss():
+    pk = []
+    seq = 0
+    t = 0.0
+    while t < 1.0:
+        seq += 1
+        pk.append((t, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                          gptp_sync(GPTP_A, seq))))
+        t += 0.125
+    pk.append((0.0, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                        gptp_announce(GPTP_A, 0, GPTP_A))))
+    # Sync silence > 375 ms; announces keep capture time advancing.
+    pk.append((1.5, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                        gptp_announce(GPTP_A, 1, GPTP_A))))
+    pk.append((2.0, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                        gptp_announce(GPTP_A, 2, GPTP_A))))
+    t = 2.1
+    while t < 2.6:  # sync resumes
+        seq += 1
+        pk.append((t, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                          gptp_sync(GPTP_A, seq))))
+        t += 0.125
+    pk.sort(key=lambda x: x[0])
+    write_pcap("testdata/gptp_sync_loss.pcap", pk)
+
+
+def scenario_gptp_pdelay():
+    pk = []
+    # Two clean exchanges -> AS_CAPABLE (800 µs turnaround).
+    gptp_exchange(pk, 0.0, GPTP_A, TALKER_MAC, GPTP_B, LISTENER_MAC, 1)
+    gptp_exchange(pk, 1.0, GPTP_A, TALKER_MAC, GPTP_B, LISTENER_MAC, 2)
+    # Slow responder: 12.3 ms turnaround -> warning on B.
+    gptp_exchange(pk, 2.0, GPTP_A, TALKER_MAC, GPTP_B, LISTENER_MAC, 3,
+                  turnaround_ns=12_300_000)
+    # Three consecutive unanswered requests -> NOT_AS_CAPABLE.
+    pk.append((4.0, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                        gptp_pdelay_req(GPTP_A, 4))))
+    pk.append((5.5, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                        gptp_pdelay_req(GPTP_A, 5))))
+    pk.append((7.0, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                        gptp_pdelay_req(GPTP_A, 6))))
+    pk.append((8.5, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                        gptp_announce(GPTP_B, 9, GPTP_B))))  # advances time
+    write_pcap("testdata/gptp_pdelay.pcap", pk)
+
+
+def scenario_gptp_adp_stale_gm():
+    """Cross-protocol story: gPTP truth vs ADP claims vs MSRP reservations."""
+    pk = []
+    seq = 0
+    t = 0.0
+    while t < 1.4:  # B is GM and syncs
+        if abs(t - round(t)) < 1e-9:
+            pk.append((t, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                              gptp_announce(GPTP_B, int(t), GPTP_B, p1=200))))
+        seq += 1
+        pk.append((t + 0.01, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                                 gptp_sync(GPTP_B, seq))))
+        t += 0.125
+    # Stream reservation established.
+    pk.append((1.10, msrp_talker([JOININ])))
+    pk.append((1.15, eth(MSRP_MC, LISTENER_MAC, ETYPE_MSRP,
+                         msrp_pdu([(3, 8, [mrp_vector(listener_fv(STREAM_ID),
+                                                      [JOININ],
+                                                      listener_events=[READY])])]))))
+    # Talker announces the correct GM -> MATCH, no warning.
+    pk.append((1.20, eth(ADP_MC, TALKER_MAC, ETYPE_AVTP,
+                         adp(0, 62, E_TALKER, avail_idx=1, gm=GPTP_B))))
+    # A second entity announces a stale GM -> mismatch warning.
+    pk.append((1.30, eth(ADP_MC, CTRL_MAC, ETYPE_AVTP,
+                         adp(0, 62, E_CTRL, avail_idx=1,
+                             gm=0x001B92FFFE00AAAA))))
+    # Sync gap while the reservation is up -> SYNC_LOST citing it.
+    pk.append((2.0, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                        gptp_announce(GPTP_B, 7, GPTP_B, p1=200))))
+    pk.append((3.0, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                        gptp_announce(GPTP_B, 8, GPTP_B, p1=200))))
+    t = 2.1
+    while t < 3.4:  # sync resumes and keeps running past the last packet
+        seq += 1
+        pk.append((t, eth(GPTP_MC, LISTENER_MAC, ETYPE_GPTP,
+                          gptp_sync(GPTP_B, seq))))
+        t += 0.125
+    # The stale entity corrects itself -> cleared.
+    pk.append((3.2, eth(ADP_MC, CTRL_MAC, ETYPE_AVTP,
+                        adp(0, 62, E_CTRL, avail_idx=2, gm=GPTP_B))))
+    pk.sort(key=lambda x: x[0])
+    write_pcap("testdata/gptp_adp_stale_gm.pcap", pk)
+
+
 def scenario_malformed():
     pk = []
     # ADP truncated mid-PDU
@@ -383,6 +604,20 @@ def scenario_malformed():
     # AECP truncated after the AVTP control header
     pk.append((0.3, (mac(TALKER_MAC) + mac(CTRL_MAC) + struct.pack(">H", ETYPE_AVTP)
                      + avtp_ctrl(0xFB, 0, 0, 20) + b"\x00\x01")))
+    # gPTP: truncated mid-header
+    pk.append((0.32, (mac(GPTP_MC) + mac(TALKER_MAC) + struct.pack(">H", ETYPE_GPTP)
+                      + gptp_sync(GPTP_A, 1)[:20])))
+    # gPTP: Announce path-trace TLV claims 2000 bytes it doesn't have
+    body = bytes(10) + struct.pack(">hB", 0, 0)
+    body += struct.pack(">BBBH", 248, 248, 0x21, 0x436A)
+    body += struct.pack(">BQHB", 248, GPTP_A, 0, 0xA0)
+    body += struct.pack(">HH", 0x0008, 2000)
+    pk.append((0.34, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP,
+                         gptp_hdr(0xB, body, GPTP_A, 2))))
+    # gPTP: PTP version 5
+    bad_ver = bytearray(gptp_sync(GPTP_A, 3))
+    bad_ver[1] = 0x05
+    pk.append((0.36, eth(GPTP_MC, TALKER_MAC, ETYPE_GPTP, bytes(bad_ver))))
     # one valid frame to prove the pipeline continues (PA-5)
     pk.append((0.4, eth(ADP_MC, TALKER_MAC, ETYPE_AVTP, adp(0, 62, E_TALKER))))
     write_pcap("testdata/malformed.pcap", pk)
@@ -467,6 +702,11 @@ def main():
     scenario_adp()
     scenario_aecp()
     scenario_acmp()
+    scenario_gptp_steady()
+    scenario_gptp_gm_change()
+    scenario_gptp_sync_loss()
+    scenario_gptp_pdelay()
+    scenario_gptp_adp_stale_gm()
     scenario_malformed()
     scenario_milan()
     return 0

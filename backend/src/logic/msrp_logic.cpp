@@ -113,6 +113,14 @@ public:
                                                           : "");
             w.kv("failure_bridge", res.failBridge ? idStr(res.failBridge) : "");
             w.kv("failure_code", (uint64_t)res.failCode);
+            // Live annotation from observed gPTP truth — never a state change
+            // of the reservation itself (see API.md).
+            {
+                int sync = mShared ? mShared->syncStateForAnnotation() : 0;
+                w.kv("gptp_sync", sync == 1   ? "HEALTHY"
+                                  : sync == 2 ? "LOST"
+                                              : "UNKNOWN");
+            }
             w.key("listeners").beginArr();
             for (auto& [mac, fp] : res.listeners) {
                 w.beginObj();
@@ -199,6 +207,15 @@ private:
         }
         res.state = to;
         res.hist.push_back({ts, n, from, to, why});
+
+        // Cross-effect: gPTP cites how many established reservations depend
+        // on the clock when sync is lost (read by GptpLogic).
+        if (mShared) {
+            if (to == "ESTABLISHED")
+                mShared->establishedStreams.insert(res.streamId);
+            else
+                mShared->establishedStreams.erase(res.streamId);
+        }
 
         Transition t;
         t.proto = Proto::MSRP;

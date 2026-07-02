@@ -202,6 +202,56 @@ std::string acmpMsgName(uint8_t t) {
     return "ACMP_MSG_" + std::to_string(t);
 }
 
+const char* gptpMsgName(uint8_t t) {
+    switch (t) {
+    case 0x0: return "SYNC";
+    case 0x2: return "PDELAY_REQ";
+    case 0x3: return "PDELAY_RESP";
+    case 0x8: return "FOLLOW_UP";
+    case 0xA: return "PDELAY_RESP_FOLLOW_UP";
+    case 0xB: return "ANNOUNCE";
+    case 0xC: return "SIGNALING";
+    }
+    return "GPTP_UNKNOWN";
+}
+
+std::string gptpTimeSourceName(uint8_t t) {
+    switch (t) {
+    case 0x10: return "ATOMIC_CLOCK";
+    case 0x20: return "GNSS";
+    case 0x30: return "TERRESTRIAL_RADIO";
+    case 0x40: return "PTP";
+    case 0x50: return "NTP";
+    case 0x60: return "HAND_SET";
+    case 0x90: return "OTHER";
+    case 0xA0: return "INTERNAL_OSCILLATOR";
+    }
+    return hexStr(t, 2);
+}
+
+std::string gptpClockClassName(uint8_t c) {
+    switch (c) {
+    case 6: return "6 (primary sync)";
+    case 7: return "7 (holdover)";
+    case 248: return "248 (default)";
+    case 255: return "255 (slave-only)";
+    }
+    return std::to_string(c);
+}
+
+std::string gptpLogIntervalStr(uint8_t raw) {
+    int8_t v = (int8_t)raw;
+    if (raw == 0x7F) return "127 (not used)";
+    if (v < -30 || v > 30) return std::to_string(v) + " (out of range)";
+    double s = (v >= 0) ? (double)(1ull << v) : 1.0 / (double)(1ull << -v);
+    char buf[48];
+    if (s >= 1.0)
+        std::snprintf(buf, sizeof buf, "%d (%.0f s)", v, s);
+    else
+        std::snprintf(buf, sizeof buf, "%d (%.0f ms)", v, s * 1e3);
+    return buf;
+}
+
 std::string acmpStatusName(uint8_t status) {
     switch (status) {
     case 0: return "SUCCESS";

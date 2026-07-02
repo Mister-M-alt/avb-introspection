@@ -16,6 +16,7 @@ namespace {
 constexpr uint16_t kEtypeMsrp = 0x22EA;
 constexpr uint16_t kEtypeMvrp = 0x88F5;
 constexpr uint16_t kEtypeAvtp = 0x22F0;
+constexpr uint16_t kEtypeGptp = 0x88F7;
 constexpr uint16_t kEtypeVlan = 0x8100;
 constexpr uint16_t kEtypeQinQ = 0x88A8;
 
@@ -77,6 +78,7 @@ EthHeader parseEth(BeReader& r, std::vector<DisplayField>* disp) {
         if (h.etype == kEtypeAvtp) et += " (AVTP)";
         else if (h.etype == kEtypeMsrp) et += " (MSRP)";
         else if (h.etype == kEtypeMvrp) et += " (MVRP)";
+        else if (h.etype == kEtypeGptp) et += " (gPTP)";
         disp->push_back({"ethertype", et});
     }
     return h;
@@ -571,6 +573,217 @@ void mrpInspectorFields(const std::vector<MrpMessage>& msgs, bool isMsrp,
     }
 }
 
+// ---------------------------------------------------------------- gPTP ---
+
+/** PTP timestamp: 48-bit seconds + 32-bit nanoseconds. */
+void gptpTimestamp(BeReader& r, const char* prefix, Sink& s) {
+    uint64_t sec = r.u48("ptp timestamp seconds");
+    uint32_t ns = r.u32("ptp timestamp ns");
+    char buf[48];
+    std::snprintf(buf, sizeof buf, "%llu.%09u s", (unsigned long long)sec, ns);
+    s.numd((std::string(prefix) + "_seconds").c_str(), sec, buf);
+    if (s.vars) s.vars->setValue(std::string(prefix) + "_ns", ns);
+}
+
+struct GptpHeader {
+    uint8_t majorSdoId = 0, msgType = 0, version = 0, domain = 0;
+    uint16_t msgLen = 0, flags = 0, srcPort = 0, seq = 0;
+    uint64_t correction = 0, srcClock = 0;
+    uint8_t control = 0, logInterval = 0;
+};
+
+/** IEEE 802.1AS frame (ethertype 0x88F7). One Sink path for analysis vars
+ *  and inspector display, bounded strictly by messageLength (PA-5) — real
+ *  captures (ProfiShark) carry trailing FCS bytes past the PDU. */
+void parseGptp(BeReader& r, Sink& s, DecodedPacket* out) {
+    GptpHeader h;
+    uint8_t b0 = r.u8("gPTP byte 0");
+    h.majorSdoId = (b0 >> 4) & 0xf;
+    h.msgType = b0 & 0xf;
+    h.version = r.u8("gPTP version") & 0xf;
+    if (h.version != 2)
+        throw ShortFrame("gPTP: unsupported PTP version " +
+                         std::to_string(h.version));
+    h.msgLen = r.u16("gPTP messageLength");
+    h.domain = r.u8("gPTP domainNumber");
+    r.skip(1, "gPTP minorSdoId");
+    h.flags = r.u16("gPTP flags");
+    h.correction = r.u64("gPTP correctionField");
+    r.skip(4, "gPTP messageTypeSpecific");
+    h.srcClock = r.u64("gPTP sourcePortIdentity.clockIdentity");
+    h.srcPort = r.u16("gPTP sourcePortIdentity.portNumber");
+    h.seq = r.u16("gPTP sequenceId");
+    h.control = r.u8("gPTP control");
+    h.logInterval = r.u8("gPTP logMessageInterval");
+
+    if (h.msgLen < 34)
+        throw ShortFrame("gPTP: messageLength " + std::to_string(h.msgLen) +
+                         " shorter than the common header");
+    // The PDU body: exactly messageLength-34 bytes; anything after is
+    // padding/FCS and must never be parsed.
+    BeReader body(r.bytes(h.msgLen - 34, "gPTP body"));
+
+    bool twoStep = (h.flags >> 9) & 1;
+    s.numd("message_type", h.msgType, gptpMsgName(h.msgType));
+    s.num("transport_specific", h.majorSdoId);
+    s.num("version", h.version);
+    s.num("message_length", h.msgLen);
+    s.num("domain_number", h.domain);
+    s.hexf("flags", h.flags, 4);
+    s.num("two_step", twoStep ? 1 : 0);
+    {
+        char buf[40];
+        std::snprintf(buf, sizeof buf, "%.3f ns",
+                      (double)(int64_t)h.correction / 65536.0);
+        s.numd("correction_field", h.correction, buf);
+    }
+    s.id("source_clock_id", h.srcClock);
+    s.num("source_port_number", h.srcPort);
+    s.num("sequence_id", h.seq);
+    s.num("control", h.control);
+    s.numd("log_message_interval", h.logInterval,
+           gptpLogIntervalStr(h.logInterval));
+
+    std::string portStr = idStr(h.srcClock) + ":" + std::to_string(h.srcPort);
+
+    switch (h.msgType) {
+    case 0x0: // SYNC — originTimestamp present (zero for two-step)
+        if (body.remaining() >= 10) gptpTimestamp(body, "origin", s);
+        break;
+    case 0x8: { // FOLLOW_UP — preciseOriginTimestamp + 802.1AS info TLV
+        gptpTimestamp(body, "origin", s);
+        while (body.remaining() >= 4) {
+            uint16_t tlvType = body.u16("tlv type");
+            uint16_t tlvLen = body.u16("tlv length");
+            if (tlvLen > body.remaining())
+                throw ShortFrame("gPTP: Follow_Up TLV overruns messageLength");
+            BeReader tlv(body.bytes(tlvLen, "tlv value"));
+            if (tlvType == 0x0003 && tlvLen >= 28) { // org extension
+                uint64_t orgSub = tlv.u48("org id + subtype");
+                if (orgSub == 0x0080C2000001ull) { // 00-80-C2, subtype 1
+                    s.num("has_as_tlv", 1);
+                    uint32_t csro = tlv.u32("cumulativeScaledRateOffset");
+                    char buf[40];
+                    std::snprintf(buf, sizeof buf, "%.3f ppm",
+                                  (double)(int32_t)csro / 2199023255552.0 * 1e6);
+                    s.numd("cumulative_scaled_rate_offset", csro, buf);
+                    s.num("gm_time_base_indicator", tlv.u16("gmTimeBaseIndicator"));
+                    // lastGmPhaseChange (12) + scaledLastGmFreqChange (4):
+                    // informational only.
+                }
+            }
+        }
+        break;
+    }
+    case 0x2: // PDELAY_REQ — 20 reserved bytes
+        break;
+    case 0x3: // PDELAY_RESP
+        gptpTimestamp(body, "req_receipt", s);
+        s.id("requesting_clock_id", body.u64("requestingPortIdentity"));
+        s.num("requesting_port_number", body.u16("requesting port"));
+        break;
+    case 0xA: // PDELAY_RESP_FOLLOW_UP
+        gptpTimestamp(body, "resp_origin", s);
+        s.id("requesting_clock_id", body.u64("requestingPortIdentity"));
+        s.num("requesting_port_number", body.u16("requesting port"));
+        break;
+    case 0xB: { // ANNOUNCE
+        body.skip(10, "announce originTimestamp");
+        uint16_t utc = body.u16("currentUtcOffset");
+        s.numd("current_utc_offset", utc, std::to_string((int16_t)utc));
+        body.skip(1, "reserved");
+        s.num("gm_priority1", body.u8("grandmasterPriority1"));
+        uint8_t cls = body.u8("clockClass");
+        s.numd("gm_clock_class", cls, gptpClockClassName(cls));
+        s.hexf("gm_clock_accuracy", body.u8("clockAccuracy"), 2);
+        s.num("gm_clock_variance", body.u16("offsetScaledLogVariance"));
+        s.num("gm_priority2", body.u8("grandmasterPriority2"));
+        s.id("gm_identity", body.u64("grandmasterIdentity"));
+        s.num("steps_removed", body.u16("stepsRemoved"));
+        uint8_t tsrc = body.u8("timeSource");
+        s.numd("time_source", tsrc, gptpTimeSourceName(tsrc));
+        // Path-trace TLV (0x0008): N clockIdentities.
+        while (body.remaining() >= 4) {
+            uint16_t tlvType = body.u16("tlv type");
+            uint16_t tlvLen = body.u16("tlv length");
+            if (tlvLen > body.remaining())
+                throw ShortFrame("gPTP: Announce TLV overruns messageLength");
+            BeReader tlv(body.bytes(tlvLen, "tlv value"));
+            if (tlvType == 0x0008) {
+                unsigned n = tlvLen / 8;
+                if (n > 32)
+                    throw ShortFrame("gPTP: implausible path trace length");
+                s.num("path_trace_count", n);
+                std::string trace;
+                for (unsigned i = 0; i < n; ++i) {
+                    if (!trace.empty()) trace += ", ";
+                    trace += idStr(tlv.u64("path trace clockIdentity"));
+                }
+                s.str("path_trace", trace);
+            }
+        }
+        break;
+    }
+    case 0xC: // SIGNALING — targetPortIdentity + TLVs (display only)
+        if (body.remaining() >= 10) {
+            s.id("target_clock_id", body.u64("targetPortIdentity"));
+            s.num("target_port_number", body.u16("target port"));
+        }
+        s.info("tlv_bytes", std::to_string(body.remaining()) + " bytes");
+        break;
+    default:
+        break;
+    }
+
+    if (out) {
+        out->type = gptpMsgName(h.msgType);
+        out->entity = idStr(h.srcClock);
+        std::string dom = " dom " + std::to_string(h.domain);
+        auto& ctx = out->logicCtxs.back();
+        switch (h.msgType) {
+        case 0x0:
+            out->summary = "SYNC seq " + std::to_string(h.seq) + dom + " from " +
+                           portStr + (twoStep ? " (two-step)" : " (one-step)");
+            break;
+        case 0x8:
+            out->summary = "FOLLOW_UP seq " + std::to_string(h.seq) + dom +
+                           " from " + portStr;
+            break;
+        case 0xB:
+            out->summary = "ANNOUNCE" + dom + " GM " + idStr(ctx.at("gm_identity")) +
+                           " prio1 " + std::to_string(ctx.at("gm_priority1")) +
+                           " class " + std::to_string(ctx.at("gm_clock_class")) +
+                           " steps " + std::to_string(ctx.at("steps_removed"));
+            break;
+        case 0x2:
+            out->summary = "PDELAY_REQ seq " + std::to_string(h.seq) + " from " +
+                           portStr;
+            break;
+        case 0x3:
+        case 0xA:
+            out->summary = std::string(gptpMsgName(h.msgType)) + " seq " +
+                           std::to_string(h.seq) + " to " +
+                           idStr(ctx.at("requesting_clock_id")) + ":" +
+                           std::to_string(ctx.at("requesting_port_number"));
+            break;
+        default:
+            out->summary = std::string(gptpMsgName(h.msgType)) + " seq " +
+                           std::to_string(h.seq) + dom + " from " + portStr;
+            break;
+        }
+        out->eventFields.emplace_back("sequence_id", std::to_string(h.seq));
+        out->eventFields.emplace_back("domain", std::to_string(h.domain));
+        if (h.msgType == 0xB) {
+            out->eventFields.emplace_back("gm_identity",
+                                          idStr(ctx.at("gm_identity")));
+            out->eventFields.emplace_back(
+                "priority1", std::to_string(ctx.at("gm_priority1")));
+            out->eventFields.emplace_back(
+                "steps_removed", std::to_string(ctx.at("steps_removed")));
+        }
+    }
+}
+
 // ------------------------------------------------------------ front door -
 
 /** Shared frame walk. Analysis path passes `out`; inspector passes `layers`. */
@@ -635,6 +848,29 @@ void decodeInner(std::span<const uint8_t> frame, DecodedPacket* out,
         if (layers) {
             layers->push_back({isMsrp ? kSvcMsrp : kSvcMvrp, {}});
             mrpInspectorFields(msgs, isMsrp, version, layers->back().fields);
+        }
+        return;
+    }
+
+    if (eth.etype == kEtypeGptp) {
+        if (out) {
+            out->interesting = true;
+            out->proto = Proto::GPTP;
+        }
+        Sink s;
+        if (out) {
+            out->logicCtxs.emplace_back(kSvcGptp);
+            s.vars = &out->logicCtxs.back();
+        }
+        if (layers) {
+            layers->push_back({kSvcGptp, {}});
+            s.disp = &layers->back().fields;
+        }
+        parseGptp(r, s, out);
+        if (out) {
+            auto& ctx = out->logicCtxs.back();
+            ctx.setValue("src_mac", eth.src);
+            ctx.setValue("dst_mac", eth.dst);
         }
         return;
     }

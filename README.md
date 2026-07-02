@@ -1,10 +1,13 @@
 # AVB Introspection
 
 A Milan-oriented introspection tool for AVB/TSN control protocols: it decodes
-**MSRP, MVRP, MAAP** and **ATDECC (ADP, AECP, ACMP)** traffic from pcap files,
-reconstructs the protocol state machines (reservations, VLAN registrations,
-address claims, entity lifecycles, command correlation, stream connections),
-and presents events, per-packet detail, timelines and live state in a web UI.
+**MSRP, MVRP, MAAP, ATDECC (ADP, AECP, ACMP)** and **gPTP (802.1AS)** traffic
+from pcap files, reconstructs the protocol state machines (reservations, VLAN
+registrations, address claims, entity lifecycles, command correlation, stream
+connections, grandmaster election and sync health), correlates them across
+protocols (e.g. each entity's announced grandmaster is checked against the
+grandmaster actually observed on the wire), and presents events, per-packet
+detail, timelines and live state in a web UI.
 
 The tool is an *observer* — it decodes and correlates traffic; generating
 traffic is [TSN-GEN]'s job. See [REQUIREMENTS.md](REQUIREMENTS.md) for the

@@ -44,8 +44,10 @@ public:
             e.lastSeen = ts;
             e.modelId = v->at("entity_model_id");
             e.gmId = v->at("gptp_grandmaster_id");
+            e.gptpDomain = (uint8_t)v->at("gptp_domain_number");
             e.talkerSources = (uint16_t)v->at("talker_stream_sources");
             e.listenerSinks = (uint16_t)v->at("listener_stream_sinks");
+            checkGmAgainstObserved(e, ts, n);
         } else if (msg == 1) { // ENTITY_DEPARTING
             e.lastSeen = ts;
             if (e.state != "DEPARTING")
@@ -78,6 +80,8 @@ public:
             w.kv("talker_sources", (uint64_t)e.talkerSources);
             w.kv("listener_sinks", (uint64_t)e.listenerSinks);
             w.kv("gptp_gm", idStr(e.gmId));
+            w.kv("gptp_domain", (uint64_t)e.gptpDomain);
+            w.kv("gm_in_sync", gmInSync(e));
             histJson(w, e.hist);
             w.endObj();
         }
@@ -89,10 +93,43 @@ private:
         uint64_t entityId = 0, modelId = 0, gmId = 0;
         uint32_t availIdx = 0;
         uint16_t talkerSources = 0, listenerSinks = 0;
+        uint8_t gptpDomain = 0;
+        bool gmMismatch = false;
         double validTime = 0, lastSeen = 0;
         std::string state; // "" until first observation
         std::vector<HistEntry> hist;
     };
+
+    /** Cross-effect (PA-6): compare the grandmaster this entity announces in
+     *  ADP against the grandmaster actually observed on the wire via gPTP. */
+    void checkGmAgainstObserved(Entity& e, double ts, uint32_t n) {
+        if (!mShared || e.gmId == 0) return;
+        auto it = mShared->gptpDomains.find(e.gptpDomain);
+        if (it == mShared->gptpDomains.end() || !it->second.gmKnown) return;
+        uint64_t observed = it->second.gmIdentity;
+        if (e.gmId != observed && !e.gmMismatch) {
+            e.gmMismatch = true;
+            transition(e, ts, n, e.state,
+                       "announces gPTP grandmaster " + idStr(e.gmId) +
+                           " but the observed grandmaster on domain " +
+                           std::to_string(e.gptpDomain) + " is " +
+                           idStr(observed) + " (stale gPTP info?)");
+        } else if (e.gmId == observed && e.gmMismatch) {
+            e.gmMismatch = false;
+            transition(e, ts, n, e.state,
+                       "gPTP grandmaster now matches the observed grandmaster " +
+                           idStr(observed));
+        }
+    }
+
+    /** Live gm_in_sync for /state — evaluated against current shared truth. */
+    std::string gmInSync(const Entity& e) const {
+        if (!mShared || e.gmId == 0) return "UNKNOWN";
+        auto it = mShared->gptpDomains.find(e.gptpDomain);
+        if (it == mShared->gptpDomains.end() || !it->second.gmKnown)
+            return "UNKNOWN";
+        return e.gmId == it->second.gmIdentity ? "MATCH" : "MISMATCH";
+    }
 
     void transition(Entity& e, double ts, uint32_t n, const std::string& to,
                     const std::string& why) {

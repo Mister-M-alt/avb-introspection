@@ -287,10 +287,71 @@ TEST(golden_acmp) {
     CHECK(st.find("\"dest_mac\":\"91:e0:f0:00:0e:80\"") != std::string::npos);
 }
 
+TEST(golden_gptp_steady) {
+    auto s = runSession("testdata/gptp_steady.pcap");
+    CHECK_EQ(s->status.load(), (int)Session::Done);
+    CHECK_EQ(s->decodeErrors.load(), (uint64_t)0);
+    CHECK(countTransitions(*s, "NO_GM -> GM_PRESENT") == 1);
+    CHECK(countTransitions(*s, "-> SYNC_HEALTHY") == 1);
+    CHECK(countTransitions(*s, "-> MASTER") == 1);
+    CHECK(countTransitions(*s, "-> SLAVE") == 1);
+    CHECK(countTransitions(*s, "-> AS_CAPABLE") == 2); // both directions
+    std::string st = s->stateJson();
+    CHECK(st.find("\"state\":\"GM_PRESENT\"") != std::string::npos);
+    CHECK(st.find("\"sync\":\"HEALTHY\"") != std::string::npos);
+    CHECK(st.find("\"sync_interval_ms\":125") != std::string::npos);
+    CHECK(st.find("\"last_turnaround_us\":800") != std::string::npos);
+}
+
+TEST(golden_gptp_gm_change) {
+    auto s = runSession("testdata/gptp_gm_change.pcap");
+    CHECK_EQ(s->decodeErrors.load(), (uint64_t)0);
+    CHECK(countTransitions(*s, "BMCA reselection") == 1);
+    CHECK(countTransitions(*s, "took over as Sync sender") == 1);
+    std::string st = s->stateJson();
+    CHECK(st.find("\"clock_identity\":\"" + idStr(0x001b92fffe000002ull) + "\"") !=
+          std::string::npos); // final GM is B
+}
+
+TEST(golden_gptp_sync_loss) {
+    auto s = runSession("testdata/gptp_sync_loss.pcap");
+    CHECK_EQ(s->decodeErrors.load(), (uint64_t)0);
+    CHECK(countTransitions(*s, "-> SYNC_LOST") == 1);
+    CHECK(countTransitions(*s, "Sync resumed") == 1);
+    // Announces kept flowing: the GM never timed out.
+    CHECK(countTransitions(*s, "-> GM_TIMED_OUT") == 0);
+}
+
+TEST(golden_gptp_pdelay) {
+    auto s = runSession("testdata/gptp_pdelay.pcap");
+    CHECK_EQ(s->decodeErrors.load(), (uint64_t)0);
+    CHECK(countTransitions(*s, "-> AS_CAPABLE") == 1);
+    CHECK(countTransitions(*s, "exceeds the 10 ms limit") == 1);
+    CHECK(countTransitions(*s, "-> NOT_AS_CAPABLE") == 1);
+}
+
+TEST(golden_gptp_adp_stale_gm) {
+    auto s = runSession("testdata/gptp_adp_stale_gm.pcap");
+    CHECK_EQ(s->decodeErrors.load(), (uint64_t)0);
+    CHECK(countTransitions(*s, "stale gPTP info") == 1);
+    CHECK(countTransitions(*s, "now matches the observed grandmaster") == 1);
+    // SYNC_LOST names the established reservation depending on the clock.
+    bool cited = false;
+    for (auto& e : s->events)
+        if (e.kind == Kind::Transition &&
+            e.summary.find("SYNC_LOST") != std::string::npos &&
+            e.summary.find("1 established stream reservation") != std::string::npos)
+            cited = true;
+    CHECK(cited);
+    std::string st = s->stateJson();
+    CHECK(st.find("\"gm_in_sync\":\"MATCH\"") != std::string::npos);
+    CHECK(st.find("\"gptp_sync\":\"HEALTHY\"") != std::string::npos);
+}
+
 TEST(golden_malformed_never_crashes) {
     auto s = runSession("testdata/malformed.pcap");
     CHECK_EQ(s->status.load(), (int)Session::Done);
-    CHECK_EQ(s->decodeErrors.load(), (uint64_t)4);
+    CHECK_EQ(s->decodeErrors.load(), (uint64_t)7);
     // The valid trailing packet still decodes (PA-5).
     bool sawValid = false;
     for (auto& e : s->events)

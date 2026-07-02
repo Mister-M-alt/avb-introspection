@@ -24,7 +24,7 @@ struct Rig {
     }
 
     std::vector<Transition> feed(const std::string& service, double ts,
-                                 std::initializer_list<std::pair<const char*, uint64_t>> vars,
+                                 const std::vector<std::pair<std::string, uint64_t>>& vars,
                                  std::initializer_list<std::pair<const char*, const char*>> bytes = {}) {
         VarLayerContext ctx(service);
         ctx.setValue("ts_ns", (uint64_t)(ts * 1e9));
@@ -53,7 +53,8 @@ struct Rig {
 
 TEST(registry_has_all_modules) {
     for (const char* svc : {"atdecc_adp", "atdecc_aecp", "atdecc_acmp",
-                            "1722_maap", "mrp_msrp", "mrp_mvrp"})
+                            "1722_maap", "mrp_msrp", "mrp_mvrp",
+                            "8021as_gptp"})
         CHECK(LogicRegistry::instance().has(svc));
 }
 
@@ -238,6 +239,235 @@ TEST(mvrp_join_leaveall_withdraw) {
                      {{"mrp_event", 5}, {"vid", 2}, {"src_mac", 0x1},
                       {"attribute_type", 1}});
     CHECK_EQ(t4[0].to, std::string("WITHDRAWN"));
+}
+
+namespace {
+
+/** Feed helpers for gPTP vars. */
+std::vector<std::pair<std::string, uint64_t>> gptpCommon(
+    uint64_t msg, uint64_t clock, uint64_t seq, uint64_t dom = 0,
+    uint64_t logIval = 0xFD /* -3 = 125 ms */) {
+    return {{"message_type", msg},     {"source_clock_id", clock},
+            {"source_port_number", 1}, {"sequence_id", seq},
+            {"domain_number", dom},    {"log_message_interval", logIval},
+            {"transport_specific", 1}, {"src_mac", clock & 0xffffffffffff}};
+}
+
+} // namespace
+
+TEST(gptp_gm_lifecycle) {
+    Rig r("8021as_gptp");
+    auto announce = [&](uint64_t gm, uint64_t p1, double ts) {
+        auto vars = gptpCommon(0xB, gm, 1, 0, 0 /* 1 s */);
+        vars.insert(vars.end(),
+                    {{"gm_identity", gm}, {"gm_priority1", p1},
+                     {"gm_priority2", 248}, {"gm_clock_class", 248},
+                     {"gm_clock_accuracy", 0x21}, {"gm_clock_variance", 100},
+                     {"steps_removed", 0}, {"time_source", 0xA0},
+                     {"current_utc_offset", 0}});
+        return r.feed("8021as_gptp", ts, vars);
+    };
+
+    auto t1 = announce(0xAAAA, 248, 0.0);
+    CHECK_EQ(t1.size(), (size_t)2); // port -> MASTER, domain NO_GM -> GM_PRESENT
+    bool sawGm = false;
+    for (auto& t : t1)
+        if (t.to == "GM_PRESENT" && t.from == "NO_GM") sawGm = true;
+    CHECK(sawGm);
+    CHECK(r.shared.gptpDomains[0].gmKnown);
+    CHECK_EQ(r.shared.gptpDomains[0].gmIdentity, (uint64_t)0xAAAA);
+
+    // Better clock takes over -> GM change transition.
+    auto t2 = announce(0xBBBB, 200, 1.0);
+    bool sawChange = false;
+    for (auto& t : t2)
+        if (t.from == "GM 0x000000000000aaaa" && t.to == "GM 0x000000000000bbbb")
+            sawChange = true;
+    CHECK(sawChange);
+    CHECK(!t2.empty() && t2.back().why.find("BMCA") != std::string::npos);
+    CHECK_EQ(r.shared.gptpDomains[0].gmIdentity, (uint64_t)0xBBBB);
+
+    // Announce silence -> GM_TIMED_OUT (derived).
+    auto t3 = r.tick(5.0);
+    CHECK_EQ(t3.size(), (size_t)1);
+    CHECK_EQ(t3[0].to, std::string("GM_TIMED_OUT"));
+    CHECK(r.snap().find("\"state\":\"GM_TIMED_OUT\"") != std::string::npos);
+    // Last-known GM stays published for the ADP comparison.
+    CHECK(r.shared.gptpDomains[0].gmKnown);
+}
+
+TEST(gptp_sync_health) {
+    Rig r("8021as_gptp");
+    auto sync = [&](uint64_t seq, double ts) {
+        auto vars = gptpCommon(0x0, 0x11, seq);
+        vars.push_back({"two_step", 1});
+        return r.feed("8021as_gptp", ts, vars);
+    };
+    auto t1 = sync(1, 0.0);
+    bool healthy = false;
+    for (auto& t : t1)
+        if (t.to == "SYNC_HEALTHY") healthy = true;
+    CHECK(healthy);
+    sync(2, 0.125);
+    sync(3, 0.250);
+
+    // > 3 × 125 ms without Sync -> LOST (derived event, n = 0).
+    auto t2 = r.tick(0.7);
+    CHECK_EQ(t2.size(), (size_t)1);
+    CHECK_EQ(t2[0].to, std::string("SYNC_LOST"));
+    CHECK(t2[0].why.find("3 × 125 ms syncReceiptTimeout") != std::string::npos);
+    CHECK_EQ(r.shared.gptpDomains[0].syncState, 2);
+
+    auto t3 = sync(4, 1.0);
+    bool resumed = false;
+    for (auto& t : t3)
+        if (t.to == "SYNC_HEALTHY" && t.why.find("resumed") != std::string::npos)
+            resumed = true;
+    CHECK(resumed);
+    CHECK_EQ(r.shared.gptpDomains[0].syncState, 1);
+}
+
+TEST(gptp_two_step_pairing) {
+    Rig r("8021as_gptp");
+    auto vars = gptpCommon(0x0, 0x11, 10);
+    vars.push_back({"two_step", 1});
+    r.feed("8021as_gptp", 0.0, vars);
+    auto fu = gptpCommon(0x8, 0x11, 10);
+    r.feed("8021as_gptp", 0.01, fu);
+    CHECK(r.snap().find("\"follow_up_count\":1") != std::string::npos);
+
+    auto orphan = gptpCommon(0x8, 0x11, 99);
+    auto t = r.feed("8021as_gptp", 0.02, orphan);
+    CHECK(t.empty()); // no transition for an unmatched FU
+    CHECK(r.snap().find("\"unmatched_follow_ups\":1") != std::string::npos);
+}
+
+TEST(gptp_pdelay_ascapable) {
+    Rig r("8021as_gptp");
+    auto req = [&](uint64_t seq, double ts) {
+        return r.feed("8021as_gptp", ts, gptpCommon(0x2, 0x22, seq, 0, 0));
+    };
+    auto resp = [&](uint64_t seq, double ts, uint64_t receiptNs) {
+        auto vars = gptpCommon(0x3, 0x33, seq);
+        vars.insert(vars.end(), {{"requesting_clock_id", 0x22},
+                                 {"requesting_port_number", 1},
+                                 {"req_receipt_seconds", 0},
+                                 {"req_receipt_ns", receiptNs}});
+        return r.feed("8021as_gptp", ts, vars);
+    };
+    auto respFu = [&](uint64_t seq, double ts, uint64_t originNs) {
+        auto vars = gptpCommon(0xA, 0x33, seq);
+        vars.insert(vars.end(), {{"requesting_clock_id", 0x22},
+                                 {"requesting_port_number", 1},
+                                 {"resp_origin_seconds", 0},
+                                 {"resp_origin_ns", originNs}});
+        return r.feed("8021as_gptp", ts, vars);
+    };
+
+    req(1, 0.0);
+    resp(1, 0.001, 1000000);
+    auto t1 = respFu(1, 0.002, 1800000); // 800 µs turnaround
+    bool capable = false;
+    for (auto& t : t1)
+        if (t.to == "AS_CAPABLE") capable = true;
+    CHECK(capable);
+    CHECK(r.snap().find("\"last_turnaround_us\":800") != std::string::npos);
+
+    // Slow responder: > 10 ms turnaround -> warning on the responder port.
+    req(2, 1.0);
+    resp(2, 1.001, 1000000);
+    auto t2 = respFu(2, 1.002, 13300000); // 12.3 ms
+    CHECK(!t2.empty());
+    CHECK(t2.back().why.find("12.3 ms") != std::string::npos);
+    CHECK(t2.back().object.find("0x0000000000000033") != std::string::npos);
+
+    // 3 consecutive unanswered requests -> NOT_AS_CAPABLE.
+    req(3, 2.0);
+    req(4, 3.5);  // closes 3 as lost (1)
+    req(5, 5.0);  // closes 4 as lost (2)
+    auto t3 = r.tick(7.0); // expires 5 (3)
+    bool notCapable = false;
+    for (auto& t : t3)
+        if (t.to == "NOT_AS_CAPABLE") notCapable = true;
+    CHECK(notCapable);
+}
+
+TEST(gptp_roles) {
+    Rig r("8021as_gptp");
+    // A pdelay-only port first...
+    r.feed("8021as_gptp", 0.0, gptpCommon(0x2, 0x22, 1, 0, 0));
+    // ...then another port sends Sync -> it is MASTER, the first is SLAVE.
+    auto vars = gptpCommon(0x0, 0x11, 1);
+    vars.push_back({"two_step", 1});
+    auto t = r.feed("8021as_gptp", 0.1, vars);
+    bool master = false, slave = false;
+    for (auto& tr : t) {
+        if (tr.to == "MASTER" &&
+            tr.object.find("0x0000000000000011") != std::string::npos)
+            master = true;
+        if (tr.to == "SLAVE" &&
+            tr.object.find("0x0000000000000022") != std::string::npos) {
+            slave = true;
+            CHECK(tr.why.find("inferred") != std::string::npos);
+        }
+    }
+    CHECK(master);
+    CHECK(slave);
+}
+
+TEST(adp_gm_mismatch_cross_check) {
+    Rig r("atdecc_adp");
+    // Observed gPTP truth: GM on domain 0 is 0xBEEF.
+    r.shared.gptpDomains[0] = {true, 0xBEEF, 1};
+
+    auto avail = [&](uint64_t gm, double ts) {
+        return r.feed("atdecc_adp", ts,
+                      {{"message_type", 0}, {"entity_id", 42},
+                       {"available_index", 1}, {"valid_time", 62},
+                       {"gptp_grandmaster_id", gm}, {"gptp_domain_number", 0}});
+    };
+
+    auto t1 = avail(0xAAAA, 0.1); // stale GM
+    CHECK_EQ(t1.size(), (size_t)2); // AVAILABLE + mismatch warning
+    CHECK(t1[1].why.find("observed grandmaster") != std::string::npos);
+    CHECK(r.snap().find("\"gm_in_sync\":\"MISMATCH\"") != std::string::npos);
+
+    auto t2 = avail(0xBEEF, 1.0); // corrected
+    CHECK_EQ(t2.size(), (size_t)1);
+    CHECK(t2[0].why.find("now matches") != std::string::npos);
+    CHECK(r.snap().find("\"gm_in_sync\":\"MATCH\"") != std::string::npos);
+
+    // Unknown domain -> UNKNOWN, no warning.
+    Rig r2("atdecc_adp");
+    auto t3 = r2.feed("atdecc_adp", 0.1,
+                      {{"message_type", 0}, {"entity_id", 7},
+                       {"available_index", 1}, {"valid_time", 62},
+                       {"gptp_grandmaster_id", 0xAAAA},
+                       {"gptp_domain_number", 0}});
+    CHECK_EQ(t3.size(), (size_t)1);
+    CHECK(r2.snap().find("\"gm_in_sync\":\"UNKNOWN\"") != std::string::npos);
+}
+
+TEST(msrp_gptp_annotation) {
+    Rig r("mrp_msrp");
+    r.feed("mrp_msrp", 0.0,
+           {{"attribute_type", 1}, {"mrp_event", 1}, {"stream_id", 0xbeef},
+            {"src_mac", 0x1}, {"dest_mac", 0x91e0f0000e80}, {"vlan_id", 2},
+            {"max_frame_size", 224}, {"max_interval_frames", 1},
+            {"priority", 3}, {"rank", 1}, {"accumulated_latency", 125000}});
+    r.feed("mrp_msrp", 0.1,
+           {{"attribute_type", 3}, {"mrp_event", 1}, {"four_packed_event", 2},
+            {"stream_id", 0xbeef}, {"src_mac", 0x2}});
+    CHECK_EQ(r.shared.establishedStreams.size(), (size_t)1);
+
+    r.shared.gptpDomains[0] = {true, 0xBEEF, 2}; // sync LOST
+    CHECK(r.snap().find("\"gptp_sync\":\"LOST\"") != std::string::npos);
+
+    // Talker withdraws -> reservation leaves the established set.
+    r.feed("mrp_msrp", 1.0,
+           {{"attribute_type", 1}, {"mrp_event", 5}, {"stream_id", 0xbeef},
+            {"src_mac", 0x1}, {"dest_mac", 0x91e0f0000e80}, {"vlan_id", 2}});
+    CHECK(r.shared.establishedStreams.empty());
 }
 
 TEST(maap_probe_announce_defend_lost) {

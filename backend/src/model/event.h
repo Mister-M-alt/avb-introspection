@@ -16,8 +16,8 @@
 
 namespace avb {
 
-enum class Proto : uint8_t { ETH = 0, MSRP, MVRP, MAAP, ADP, AECP, ACMP };
-constexpr int kProtoCount = 7;
+enum class Proto : uint8_t { ETH = 0, MSRP, MVRP, MAAP, ADP, AECP, ACMP, GPTP };
+constexpr int kProtoCount = 8;
 
 inline const char* protoName(Proto p) {
     switch (p) {
@@ -28,6 +28,7 @@ inline const char* protoName(Proto p) {
     case Proto::ADP: return "ADP";
     case Proto::AECP: return "AECP";
     case Proto::ACMP: return "ACMP";
+    case Proto::GPTP: return "GPTP";
     }
     return "ETH";
 }

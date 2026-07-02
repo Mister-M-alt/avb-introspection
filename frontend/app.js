@@ -5,13 +5,15 @@
 
 /* ────────────────────────── constants ────────────────────────── */
 
-const PROTOCOLS = ['MSRP', 'MVRP', 'MAAP', 'ADP', 'AECP', 'ACMP'];
+const PROTOCOLS = ['GPTP', 'MSRP', 'MVRP', 'MAAP', 'ADP', 'AECP', 'ACMP'];
 const KINDS = ['packet', 'transition', 'error'];
 
 /* Protocol accent colors — dark-surface categorical palette validated with the
    dataviz skill's checker (adjacent CVD dE 59.2, all >= 3:1 on the surfaces).
+   Identity is never color-alone: every lane/chip/badge carries a text label.
    Must stay in sync with the --c-* custom properties in style.css. */
 const PROTO_COLORS = {
+  GPTP: '#2fa3a8',
   MSRP: '#199e70',
   MVRP: '#3987e5',
   MAAP: '#d95926',
@@ -920,6 +922,8 @@ function sessionView(app, id) {
     S.selected = i;
     S.lonePacket = 0;
     scheduleTable();
+    const e = S.events[i];
+    if (e) tlCenterOn(e.ts); /* keep the selection visible in the timeline */
     tlSchedule();
     if (opts.scroll) scrollToSelected();
     if (S.tab !== 'inspect') setTab('inspect');
@@ -1152,12 +1156,16 @@ function sessionView(app, id) {
 
   function stateClass(sName) {
     const u = String(sName || '').toUpperCase();
-    if (u.includes('FAIL') || u === 'TIMED_OUT' || u === 'LOST' || u.includes('ERROR')) return 'st-bad';
+    if (u.includes('FAIL') || u.includes('TIMED_OUT') || u === 'LOST'
+      || u === 'MISMATCH' || u === 'NOT_AS_CAPABLE' || u.includes('ERROR')) return 'st-bad';
     if (u === 'DEFENDING') return 'st-serious';
     if (u === 'AVAILABLE' || u === 'ESTABLISHED' || u === 'REGISTERED' || u === 'ACQUIRED'
-      || u === 'CONNECTED' || u === 'READY' || u === 'SUCCESS' || u === 'ADVERTISE') return 'st-good';
+      || u === 'CONNECTED' || u === 'READY' || u === 'SUCCESS' || u === 'ADVERTISE'
+      || u === 'HEALTHY' || u === 'MATCH' || u === 'GM_PRESENT'
+      || u === 'AS_CAPABLE' || u === 'MASTER') return 'st-good';
     if (u === 'PENDING' || u === 'PROBING' || u === 'CONNECTING' || u === 'LEAVING'
-      || u === 'DEPARTING' || u === 'DISCONNECTING' || u.includes('ASKING')) return 'st-warn';
+      || u === 'DEPARTING' || u === 'DISCONNECTING' || u === 'NO_GM'
+      || u.includes('ASKING')) return 'st-warn';
     return 'st-neutral';
   }
 
@@ -1255,7 +1263,10 @@ function sessionView(app, id) {
         ['talker srcs', en.talker_sources],
         ['listener sinks', en.listener_sinks],
         ['model', en.model_id],
-        ['gPTP GM', en.gptp_gm],
+        ['gPTP GM', en.gptp_gm ? h('span', null,
+          h('span', { class: 'kv-v mono' }, en.gptp_gm), ' ',
+          en.gm_in_sync && en.gm_in_sync !== 'UNKNOWN'
+            ? stateBadge(en.gm_in_sync, true) : null) : undefined],
       ]),
       null, en.history));
 
@@ -1279,6 +1290,8 @@ function sessionView(app, id) {
           ['declaration', h('span', null, stateBadge(r.declaration, true),
             failed ? h('span', { class: 'errtext small' },
               ' bridge ' + (r.failure_bridge || '?') + ' code ' + (r.failure_code !== undefined ? r.failure_code : '?')) : null)],
+          ['gPTP sync', r.gptp_sync && r.gptp_sync !== 'UNKNOWN'
+            ? stateBadge(r.gptp_sync, true) : undefined],
         ]),
         listeners.length
           ? h('div', { class: 'listeners' }, h('span', { class: 'kv-k' }, 'listeners '), listeners)
@@ -1358,12 +1371,60 @@ function sessionView(app, id) {
         null);
     });
 
+    const gptp = st.gptp || {};
+    const gptpDomSec = stateSection('gPTP domains (802.1AS)', gptp.domains, (d) => {
+      const gm = d.grandmaster || {};
+      return sobj(
+        h('span', null, 'domain ', h('b', { class: 'mono' }, String(d.domain)),
+          h('span', { class: 'dim' }, ' GM '),
+          gm.name ? h('b', null, gm.name + ' ') : null,
+          h('span', { class: 'mono' }, gm.clock_identity || '—')),
+        h('span', null, stateBadge(d.state), ' ',
+          stateBadge(d.sync || 'UNKNOWN', true)),
+        kvList([
+          ['prio1/2', gm.priority1 + '/' + gm.priority2],
+          ['clock class', gm.clock_class],
+          ['steps', gm.steps_removed],
+          ['time source', gm.time_source],
+          ['sync interval', d.sync_interval_ms + ' ms'],
+          ['sync/fu', d.sync_count + '/' + d.follow_up_count],
+          ['announces', d.announce_count],
+          ['rate offset', (typeof d.cumulative_rate_offset_ppm === 'number'
+            ? d.cumulative_rate_offset_ppm.toFixed(2) + ' ppm' : undefined)],
+          ['path', d.path_trace],
+        ]),
+        null, d.history);
+    });
+
+    const gptpPortSec = stateSection('gPTP ports', gptp.ports, (p) => {
+      const pd = p.pdelay || {};
+      return sobj(
+        h('span', null,
+          p.name ? h('b', null, p.name + ' ') : null,
+          h('span', { class: 'mono' }, p.port || ''),
+          h('span', { class: 'dim small' }, ' ' + (p.src_mac || ''))),
+        h('span', null, stateBadge(p.role), ' ', stateBadge(p.as_capable, true)),
+        kvList([
+          ['domain', p.domain],
+          ['sync sent', p.sync_sent],
+          ['announce sent', p.announce_sent],
+          ['pdelay ok/init', pd.complete + '/' + pd.initiated],
+          ['pdelay lost', pd.lost],
+          ['turnaround', (typeof pd.last_turnaround_us === 'number' && pd.last_turnaround_us >= 0
+            ? pd.last_turnaround_us.toFixed(1) + ' µs (wire)' : undefined)],
+          ['req↔resp gap', (typeof pd.last_observed_gap_ms === 'number' && pd.last_observed_gap_ms >= 0
+            ? '≈' + pd.last_observed_gap_ms.toFixed(2) + ' ms (capture)' : undefined)],
+        ]),
+        null, p.history);
+    });
+
     inspBody.replaceChildren(h('div', { class: 'insp-scroll' },
       h('div', { class: 'state-actions' },
         h('span', { class: 'dim small' }, 'Reconstructed protocol state'),
         h('span', { class: 'toolbar-spacer' }),
         refreshBtn),
       entitySec, resvSec, vlanSec, domSec, maapSec, connSec, aecpSec,
+      gptpDomSec, gptpPortSec,
     ));
   }
 
@@ -1568,6 +1629,19 @@ function sessionView(app, id) {
     zoomAround(tOf(x), Math.exp(dy * 0.0016));
   }
 
+  /* Pan (never zoom) so time T is visible: used when a selection is made from
+     the table or keyboard while the timeline is zoomed elsewhere. No-op when
+     T is already comfortably inside the window. */
+  function tlCenterOn(t) {
+    const span = TL.t1 - TL.t0;
+    const margin = span * 0.05;
+    if (t >= TL.t0 + margin && t <= TL.t1 - margin) return;
+    const c = clampDomain(t - span / 2, t + span / 2);
+    TL.t0 = c[0]; TL.t1 = c[1];
+    TL.follow = false;
+    tlSchedule();
+  }
+
   function tlLowerBound(t) {
     /* first index k with TL.ts[k] >= t (ts ascending: capture order) */
     let lo = 0, hi = TL.count;
@@ -1766,6 +1840,9 @@ function sessionView(app, id) {
     if (S.closed) return;
     const ctx = TL.canvas.getContext('2d');
     if (!ctx) return;
+    /* expose the visible window for tests and tooling */
+    TL.canvas.dataset.t0 = TL.t0.toFixed(6);
+    TL.canvas.dataset.t1 = TL.t1.toFixed(6);
     ctx.setTransform(TL.dpr, 0, 0, TL.dpr, 0, 0);
     const w = TL.w, hh = TL.hgt;
     const L = laneCount();
