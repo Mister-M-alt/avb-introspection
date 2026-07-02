@@ -27,6 +27,33 @@ jobs:
       - name: Integration test (TV-3)
         run: ./scripts/integration_test.sh
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++ make zlib1g-dev libsodium-dev
+
+      - name: Install Playwright (Firefox)
+        run: |
+          pip install playwright
+          playwright install --with-deps firefox
+
+      - name: Browser E2E (TV-4)
+        run: |
+          make -j"$(nproc)" build/avb-introspectd
+          python3 tools/gen_pcaps.py
+          python3 scripts/e2e_playwright.py
+
+      - name: Upload failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: build/e2e-*.png
+          if-no-files-found: ignore
+
   docker:
     runs-on: ubuntu-latest
     steps:
