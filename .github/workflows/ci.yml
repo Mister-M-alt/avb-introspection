@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 Kebag-Logic
+# SPDX-License-Identifier: MIT
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++ make zlib1g-dev libsodium-dev
+
+      - name: Frontend syntax check
+        run: node --check frontend/app.js
+
+      - name: Generate golden pcaps (TV-1)
+        run: python3 tools/gen_pcaps.py
+
+      - name: Unit tests (TV-2)
+        run: make -j"$(nproc)" test
+
+      - name: Integration test (TV-3)
+        run: ./scripts/integration_test.sh
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker build (BE-3)
+        run: docker build -t avb-introspection .

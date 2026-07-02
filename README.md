@@ -1,0 +1,136 @@
+# AVB Introspection
+
+A Milan-oriented introspection tool for AVB/TSN control protocols: it decodes
+**MSRP, MVRP, MAAP** and **ATDECC (ADP, AECP, ACMP)** traffic from pcap files,
+reconstructs the protocol state machines (reservations, VLAN registrations,
+address claims, entity lifecycles, command correlation, stream connections),
+and presents events, per-packet detail, timelines and live state in a web UI.
+
+The tool is an *observer* — it decodes and correlates traffic; generating
+traffic is [TSN-GEN]'s job. See [REQUIREMENTS.md](REQUIREMENTS.md) for the
+full requirements and [docs/API.md](docs/API.md) for the API contract.
+
+## Quick start
+
+Dependencies: `g++` (C++20), `make`, `zlib`, `libsodium` (and Python 3 for
+the test-data generator).
+
+```bash
+make -j                       # -> build/avb-introspectd
+./build/avb-introspectd       # listens on :8342, data in ./data
+```
+
+Open http://localhost:8342 in Firefox, register an account, upload a pcap
+(or open one by server path), and explore. To try it without real traffic:
+
+```bash
+python3 tools/gen_pcaps.py    # writes Milan scenarios to testdata/
+# then upload testdata/milan_scenario.pcap in the UI
+```
+
+### Docker (BE-3)
+
+```bash
+docker build -t avb-introspection .
+docker run -p 8342:8342 -v avb-data:/data avb-introspection
+```
+
+Uploaded pcaps, sessions and user accounts persist in the `/data` volume and
+survive restarts (BE-8).
+
+## Architecture
+
+```
+frontend/            single-page web UI (vanilla JS, Firefox-first)
+backend/src/
+  pcapio/            pcap + pcapng readers (Ethernet captures)
+  decode/            wire-format decoders for the six protocols
+  tsn_gen/           vendored TSN-GEN logic-override contract (see below)
+  logic/             protocol state machines as TSN-GEN logic modules
+  engine/            parallel decode -> ordered single-threaded state pass
+  net/               HTTP/1.1 + RFC 6455 WebSocket server (POSIX sockets)
+  auth/              accounts, Argon2id password hashes (libsodium)
+  store/             on-disk persistence of pcaps + session metadata
+  api/               REST endpoints, WS streaming, metrics, static serving
+```
+
+Concurrency model (CO-1..4): client connections are served by a thread pool
+that grows on demand up to `--max-threads`; captures are partitioned across
+CPU cores and decoded in parallel; the decoded packets are then re-ordered
+by capture timestamp and fed to the state machines by a single thread —
+state reconstruction is order-sensitive, so reordered packets never reach
+the logic modules.
+
+The WebSocket event stream uses binary frames, each a zlib (RFC 1950)
+stream the browser inflates with `DecompressionStream("deflate")` (OQ-10:
+zlib at `Z_BEST_SPEED` — lightweight, native on both ends).
+
+## TSN-GEN integration (BE-2)
+
+TSN-GEN's protocol *logic* layer is an override mechanism: modules subclass
+`ILogicModule` (`onEncode` / `onDecode` / `nextLayer`), register with
+`REGISTER_LOGIC("<service>", Class)`, and read named vars through a
+`LayerContext`. This backend implements every protocol state machine as
+exactly such a module (`backend/src/logic/`):
+
+| Service | Module | State reconstructed |
+|---|---|---|
+| `mrp_msrp` | MsrpLogic | reservation per StreamID, SR domains |
+| `mrp_mvrp` | MvrpLogic | VLAN registration per VID |
+| `1722_maap` | MaapLogic | address range per claimant (probe/defend) |
+| `atdecc_adp` | AdpLogic | entity lifecycle incl. valid_time expiry |
+| `atdecc_aecp` | AecpLogic | in-flight commands, timeouts, entity names |
+| `atdecc_acmp` | AcmpLogic | stream connection per talker/listener pair |
+
+The three contract headers in `backend/src/tsn_gen/` are vendored unmodified
+from TSN-GEN (MIT). TSN-GEN v1 ships `LayerContext::getValue/setValue` as
+stubs pending its Stack serializer; `VarLayerContext` here is the working
+implementation backed by the decoders' field storage, so the modules run for
+real today and can be linked into TSN-GEN unchanged once its serializer
+lands. `VarLayerContext::getBytes/setBytes` anticipates TSN-GEN's planned
+typed accessors for fields wider than `uint64_t` (e.g. the 64-byte AEM
+`entity_name`).
+
+## Testing
+
+```bash
+make -j test                   # unit tests incl. golden-trace runs (TV-1/2)
+./scripts/integration_test.sh  # black-box REST+WS test with restart (TV-3)
+```
+
+`tools/gen_pcaps.py` builds byte-exact golden scenarios per protocol
+(including malformed frames — decode errors become events, never crashes,
+PA-5). It stands in for TSN-GEN generated traffic; regenerate the scenarios
+through TSN-GEN once its serializer lands.
+
+## Server options
+
+```
+--port N            listen port                    (default 8342)
+--data DIR          persistent data directory      (default ./data)
+--frontend DIR      static frontend directory      (default ./frontend)
+--max-threads N     serving thread cap (CO-1)      (default 64)
+--max-upload-mb N   pcap upload limit              (default 1024)
+```
+
+Runtime metrics (NF-2: per-session packet rates, per-client bytes, CPU/RSS,
+pool utilisation) are at `GET /api/metrics` and shown on the UI home screen.
+
+## Security (SE)
+
+Registration + login are required for every API call; passwords are stored
+as Argon2id hashes (libsodium `crypto_pwhash_str`); sessions use random
+64-hex bearer tokens. TLS is not terminated by the backend — put a reverse
+proxy in front for deployments beyond a trusted lab network (OQ-12).
+
+## Notes / deviations
+
+- **OQ-11**: built with plain Make + C++20 (CMake was proposed; Make keeps
+  the toolchain minimal). GCC ≥ 12 or a comparable Clang works.
+- v1 is pcap-only; live capture (BE-6) and real-time views (FE-7) are v2.
+- pcapng inputs are supported alongside classic pcap (µs and ns variants).
+
+## License
+
+MIT — see [LICENSE](LICENSE). Runtime dependencies: zlib (zlib licence),
+libsodium (ISC); vendored TSN-GEN headers (MIT, Kebag-Logic).

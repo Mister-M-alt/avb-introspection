@@ -1,0 +1,6 @@
+build/
+data/
+testdata/
+__pycache__/
+*.tmp
+.gitprep
