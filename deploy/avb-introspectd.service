@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2026 Kebag-Logic
+# SPDX-License-Identifier: MIT
+#
+# systemd unit for the backend (VM/bare-metal deployments fronted by an
+# nginx on another machine — see deploy/nginx.conf).
+#
+# Install:
+#   sudo useradd --system --home /var/lib/avb-introspection avb
+#   sudo mkdir -p /opt/avb-introspection /var/lib/avb-introspection
+#   sudo cp build/avb-introspectd /opt/avb-introspection/
+#   sudo cp -r frontend /opt/avb-introspection/
+#   sudo chown -R avb:avb /var/lib/avb-introspection
+#   sudo cp deploy/avb-introspectd.service /etc/systemd/system/
+#   sudo systemctl enable --now avb-introspectd
+
+[Unit]
+Description=AVB Introspection backend (Milan protocol analyzer)
+Documentation=https://github.com/Mister-M-alt/avb-introspection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=avb
+Group=avb
+ExecStart=/opt/avb-introspection/avb-introspectd \
+    --port 8342 \
+    --data /var/lib/avb-introspection \
+    --frontend /opt/avb-introspection/frontend
+Restart=on-failure
+RestartSec=2
+
+# Hardening — the daemon only needs its data directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/avb-introspection
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
