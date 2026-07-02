@@ -89,7 +89,7 @@ TEST(pcap_rejects_bad_input) {
     CHECK(!p.open(tmpFile("t_bad.pcap"), err));
     CHECK(!err.empty());
 
-    // Non-Ethernet link type is refused (v1).
+    // Non-Ethernet link type is refused (v1) and named in the error.
     std::string f;
     put32le(f, 0xa1b2c3d4);
     put16le(f, 2);
@@ -97,10 +97,83 @@ TEST(pcap_rejects_bad_input) {
     put32le(f, 0);
     put32le(f, 0);
     put32le(f, 262144);
-    put32le(f, 101); // LINKTYPE_RAW
-    writeFile(tmpFile("t_raw.pcap"), f);
+    put32le(f, 113); // LINKTYPE_LINUX_SLL, "any" interface
+    writeFile(tmpFile("t_sll.pcap"), f);
     PcapFile p2;
-    CHECK(!p2.open(tmpFile("t_raw.pcap"), err));
+    CHECK(!p2.open(tmpFile("t_sll.pcap"), err));
+    CHECK(err.find("Linux cooked/SLL") != std::string::npos);
+    CHECK(err.find("\"any\"") != std::string::npos);
+}
+
+TEST(pcapng_mpacket_preamble_stripped) {
+    std::string f;
+    // SHB
+    put32le(f, 0x0a0d0d0a);
+    put32le(f, 28);
+    put32le(f, 0x1a2b3c4d);
+    put16le(f, 1);
+    put16le(f, 0);
+    put32le(f, 0xffffffff);
+    put32le(f, 0xffffffff);
+    put32le(f, 28);
+    // IDB: 802.3br mPacket (ProfiShark preamble mode)
+    put32le(f, 1);
+    put32le(f, 20);
+    put16le(f, 274);
+    put16le(f, 0);
+    put32le(f, 0);
+    put32le(f, 20);
+    // EPB: preamble(7×0x55) + SFD(0xD5) + 60-byte frame + 4-byte FCS
+    const uint32_t caplen = 8 + 60 + 4;
+    put32le(f, 6);
+    put32le(f, 32 + caplen);
+    put32le(f, 0);
+    put32le(f, 0);
+    put32le(f, 1000);
+    put32le(f, caplen);
+    put32le(f, caplen);
+    f.append(7, '\x55');
+    f.push_back('\xd5');
+    f.push_back('\x01'); // frame starts with the MSRP multicast dst
+    f.append(59, '\0');
+    f.append(4, '\xAA'); // FCS
+    put32le(f, 32 + caplen);
+    writeFile(tmpFile("t_mpacket.pcapng"), f);
+
+    PcapFile p;
+    std::string err;
+    CHECK(p.open(tmpFile("t_mpacket.pcapng"), err));
+    CHECK_EQ(err, std::string());
+    CHECK_EQ(p.packets().size(), (size_t)1);
+    CHECK_EQ(p.packets()[0].caplen, 64u);       // preamble+SFD gone
+    CHECK_EQ(p.packetData(0)[0], (uint8_t)0x01); // frame starts at dst MAC
+}
+
+TEST(pcapng_names_non_ethernet_linktype) {
+    std::string f;
+    // SHB
+    put32le(f, 0x0a0d0d0a);
+    put32le(f, 28);
+    put32le(f, 0x1a2b3c4d);
+    put16le(f, 1);
+    put16le(f, 0);
+    put32le(f, 0xffffffff);
+    put32le(f, 0xffffffff);
+    put32le(f, 28);
+    // IDB: Linux SLL2 (captured on "any")
+    put32le(f, 1);
+    put32le(f, 20);
+    put16le(f, 276);
+    put16le(f, 0);
+    put32le(f, 0);
+    put32le(f, 20);
+    writeFile(tmpFile("t_sll2.pcapng"), f);
+
+    PcapFile p;
+    std::string err;
+    CHECK(!p.open(tmpFile("t_sll2.pcapng"), err));
+    CHECK(err.find("no Ethernet interface") != std::string::npos);
+    CHECK(err.find("SLL2") != std::string::npos);
 }
 
 TEST(pcapng_basic) {

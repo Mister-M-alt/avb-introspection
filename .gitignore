@@ -3,4 +3,6 @@ data/
 testdata/
 __pycache__/
 *.tmp
+*.pcap
+*.pcapng
 .gitprep

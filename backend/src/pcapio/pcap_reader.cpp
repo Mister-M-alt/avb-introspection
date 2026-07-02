@@ -17,6 +17,51 @@ constexpr uint32_t kMagicNs = 0xa1b23c4d;
 constexpr uint32_t kMagicNsSwap = 0x4d3cb2a1;
 constexpr uint32_t kMagicNg = 0x0a0d0d0a;
 constexpr uint16_t kLinkEthernet = 1;
+// IEEE 802.3br mPackets: preamble + SMD before the frame, e.g. ProfiShark
+// taps capturing with preamble for hardware timestamping.
+constexpr uint16_t kLinkEthernetMPacket = 274;
+
+bool usableLinkType(uint16_t lt) {
+    return lt == kLinkEthernet || lt == kLinkEthernetMPacket;
+}
+
+std::string linkTypeName(uint16_t lt) {
+    switch (lt) {
+    case 0: return "NULL/loopback (0)";
+    case 1: return "Ethernet (1)";
+    case 101: return "raw IP (101)";
+    case 105: return "IEEE 802.11 (105)";
+    case 113: return "Linux cooked/SLL (113, the \"any\" pseudo-interface)";
+    case 127: return "802.11 Radiotap (127)";
+    case 274: return "802.3br mPacket (274)";
+    case 276: return "Linux cooked v2/SLL2 (276, the \"any\" pseudo-interface)";
+    }
+    return "link type " + std::to_string(lt);
+}
+
+const char* kEthernetHint =
+    "; v1 decodes Ethernet captures only — capture directly on the wired "
+    "interface (e.g. tcpdump -i eth0), not on \"any\"";
+
+/**
+ * 802.3br mPacket record -> plain Ethernet frame: skip the 0x55 preamble
+ * bytes and the SMD. Express frames (SMD-E, 0xD5) are real frames;
+ * preemption fragments (SMD-S/C) are left untouched and surface as
+ * decode-error events downstream.
+ */
+void stripMPacketPreamble(PcapPacket& p, const std::vector<uint8_t>& data) {
+    const uint8_t* d = data.data() + p.offset;
+    uint32_t lim = std::min<uint32_t>(p.caplen, 16);
+    for (uint32_t i = 0; i < lim; ++i) {
+        if (d[i] == 0xD5) { // SFD/SMD-E: frame starts right after
+            p.offset += i + 1;
+            p.caplen -= i + 1;
+            if (p.origlen > i) p.origlen -= i + 1;
+            return;
+        }
+        if (d[i] != 0x55) return; // not preamble — fragment or garbage
+    }
+}
 
 class Cursor {
 public:
@@ -97,9 +142,9 @@ bool PcapFile::parseClassic(std::string& err) {
         err = "truncated pcap global header";
         return false;
     }
-    if ((network & 0xffff) != kLinkEthernet) {
-        err = "unsupported link type " + std::to_string(network & 0xffff) +
-              " (only Ethernet is supported in v1)";
+    uint16_t linktype = (uint16_t)(network & 0xffff);
+    if (!usableLinkType(linktype)) {
+        err = "capture is " + linkTypeName(linktype) + kEthernetHint;
         return false;
     }
 
@@ -119,6 +164,7 @@ bool PcapFile::parseClassic(std::string& err) {
         p.origlen = origlen;
         p.offset = c.pos();
         c.skip(caplen);
+        if (linktype == kLinkEthernetMPacket) stripMPacketPreamble(p, mData);
         mPackets.push_back(p);
     }
     if (mPackets.empty()) {
@@ -146,7 +192,7 @@ bool PcapFile::parseNg(std::string& err) {
             std::memcpy(&rawLen, mData.data() + c.pos(), 4);
             uint32_t bom;
             std::memcpy(&bom, mData.data() + c.pos() + 4, 4);
-            swap = (bom == 0x3c4d2b1a);
+            swap = (bom == 0x4d3c2b1a); // byte-swapped 0x1a2b3c4d
             if (!swap && bom != 0x1a2b3c4d) {
                 err = "pcapng: bad byte-order magic";
                 return false;
@@ -196,7 +242,7 @@ bool PcapFile::parseNg(std::string& err) {
             }
             ifaceNsPerTick.push_back(nsPerTick);
             ifaceLink.push_back(linktype);
-            if (linktype == kLinkEthernet) sawEthernet = true;
+            if (usableLinkType(linktype)) sawEthernet = true;
         } else if (blockType == 6) { // EPB
             uint32_t ifaceId, tsHi, tsLo, caplen, origlen;
             if (!c.u32(ifaceId, swap) || !c.u32(tsHi, swap) || !c.u32(tsLo, swap) ||
@@ -204,7 +250,7 @@ bool PcapFile::parseNg(std::string& err) {
                 err = "pcapng: truncated EPB";
                 return false;
             }
-            if (ifaceId < ifaceLink.size() && ifaceLink[ifaceId] == kLinkEthernet) {
+            if (ifaceId < ifaceLink.size() && usableLinkType(ifaceLink[ifaceId])) {
                 uint64_t nsPerTick = ifaceNsPerTick[ifaceId];
                 PcapPacket p;
                 p.tsNanos = (((uint64_t)tsHi << 32) | tsLo) * nsPerTick;
@@ -215,6 +261,8 @@ bool PcapFile::parseNg(std::string& err) {
                     err = "pcapng: truncated packet data";
                     return false;
                 }
+                if (ifaceLink[ifaceId] == kLinkEthernetMPacket)
+                    stripMPacketPreamble(p, mData);
                 mPackets.push_back(p);
             }
         } else if (blockType == 3) { // SPB — no timestamp, single interface
@@ -223,12 +271,14 @@ bool PcapFile::parseNg(std::string& err) {
                 err = "pcapng: truncated SPB";
                 return false;
             }
-            if (!ifaceLink.empty() && ifaceLink[0] == kLinkEthernet) {
+            if (!ifaceLink.empty() && usableLinkType(ifaceLink[0])) {
                 PcapPacket p;
                 p.tsNanos = mPackets.empty() ? 0 : mPackets.back().tsNanos;
                 p.caplen = blockLen - 16;
                 p.origlen = origlen;
                 p.offset = c.pos();
+                if (ifaceLink[0] == kLinkEthernetMPacket)
+                    stripMPacketPreamble(p, mData);
                 mPackets.push_back(p);
             }
         }
@@ -236,7 +286,16 @@ bool PcapFile::parseNg(std::string& err) {
     }
 
     if (!sawEthernet) {
-        err = "pcapng: no Ethernet interface found (only Ethernet is supported in v1)";
+        err = "pcapng: no Ethernet interface in the capture";
+        if (ifaceLink.empty()) {
+            err += " (no interface description blocks at all)";
+        } else {
+            err += " (found: ";
+            for (size_t i = 0; i < ifaceLink.size(); ++i)
+                err += (i ? ", " : "") + linkTypeName(ifaceLink[i]);
+            err += ")";
+        }
+        err += kEthernetHint;
         return false;
     }
     if (mPackets.empty()) {
