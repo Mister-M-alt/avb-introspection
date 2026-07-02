@@ -123,6 +123,19 @@ as Argon2id hashes (libsodium `crypto_pwhash_str`); sessions use random
 64-hex bearer tokens. TLS is not terminated by the backend — put a reverse
 proxy in front for deployments beyond a trusted lab network (OQ-12).
 
+### Remote deployment
+
+`deploy/` contains an nginx reverse-proxy setup for remote access: correct
+WebSocket upgrade for `/api/ws`, 1 GiB streamed uploads, and a ready-to-
+enable TLS server block.
+
+```bash
+docker compose -f deploy/docker-compose.yml up --build   # UI on port 80
+```
+
+For bare metal, point the upstream in `deploy/nginx.conf` at
+`127.0.0.1:8342` and drop it into `/etc/nginx/conf.d/`.
+
 ## Notes / deviations
 
 - **OQ-11**: built with plain Make + C++20 (CMake was proposed; Make keeps
