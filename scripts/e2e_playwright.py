@@ -178,6 +178,40 @@ def run_tests(page, url):
     expect(notes).to_be_enabled(timeout=10000)
     assert notes.input_value() == NOTE_TEXT, "notes lost after reload"
 
+    # ---- presence: the header shows who is where ----------------------------
+    expect(page.locator("#presence")).to_be_visible()
+    expect(page.locator("#presence-count")).to_have_text(
+        re.compile(r"[1-9]"), timeout=15000)
+    page.locator("#presence").hover()
+    expect(page.locator(
+        f'#presence-list .presence-entry[data-user="{USER}"]').first
+           ).to_be_visible(timeout=10000)
+    page.mouse.move(400, 400)  # leave the popover area
+
+    # ---- notes conflict: stale rev -> banner -> take theirs ----------------
+    page.locator("#tab-notes").click()
+    notes = page.locator("#notes-editor")
+    expect(notes).to_be_enabled(timeout=10000)
+    # Sabotage from "another user": rewrite the notes behind the UI's back.
+    page.evaluate(
+        """async ([sid, tok]) => {
+             await fetch(`api/sessions/${sid}/notes`, {
+               method: 'PUT',
+               headers: {'Authorization': 'Bearer ' + tok,
+                         'Content-Type': 'application/json'},
+               body: JSON.stringify({markdown: '# Someone else was here\\n'}),
+             });
+           }""",
+        [page.url.split("session/")[1],
+         page.evaluate("localStorage.getItem('avb.token')")])
+    notes.fill("# My conflicting edit\n")
+    page.locator("#notes-save").click()
+    expect(page.locator("#notes-conflict")).to_be_visible(timeout=10000)
+    page.locator("#notes-take-theirs").click()
+    expect(page.locator("#notes-conflict")).to_be_hidden()
+    assert notes.input_value().startswith("# Someone else was here"), \
+        "take-theirs did not adopt the other content"
+
     # ---- logout / login round trip -----------------------------------------
     page.locator("#logout-btn").click()
     expect(page.locator("#f-pass")).to_be_visible()
@@ -185,6 +219,29 @@ def run_tests(page, url):
     page.locator("#f-pass").fill(PASSWORD)
     page.locator("button[type=submit]").click()
     expect(page.get_by_text("milan_scenario.pcap").first).to_be_visible(
+        timeout=10000)
+    # Regular users see no admin entry.
+    expect(page.locator("#admin-link")).to_be_hidden()
+
+    # ---- admin panel ---------------------------------------------------------
+    page.locator("#logout-btn").click()
+    expect(page.locator("#f-pass")).to_be_visible()
+    page.locator("#f-user").fill("admin")
+    page.locator("#f-pass").fill("admin-pass-123")
+    page.locator("button[type=submit]").click()
+    expect(page.locator("#admin-link")).to_be_visible(timeout=10000)
+    page.locator("#admin-link").click()
+    expect(page.locator(f'.aurow[data-user="{USER}"]')).to_be_visible(
+        timeout=10000)
+    # Create and delete a user through the panel.
+    page.locator("#admin-new-user").fill("panel-user")
+    page.locator("#admin-new-pass").fill("panel-pass-123")
+    page.locator("#admin-create").click()
+    expect(page.locator('.aurow[data-user="panel-user"]')).to_be_visible(
+        timeout=10000)
+    page.on("dialog", lambda d: d.accept())
+    page.locator('button.admin-del[data-user="panel-user"]').click()
+    expect(page.locator('.aurow[data-user="panel-user"]')).to_be_hidden(
         timeout=10000)
 
     # ---- no console errors --------------------------------------------------
@@ -212,6 +269,8 @@ def main():
     server = subprocess.Popen(
         [binary, "--port", str(port), "--data", data_dir,
          "--frontend", os.path.join(ROOT, "frontend")],
+        env={**os.environ, "AVB_ADMIN_USER": "admin",
+             "AVB_ADMIN_PASSWORD": "admin-pass-123"},
         stdout=subprocess.DEVNULL)
     try:
         wait_port(port)

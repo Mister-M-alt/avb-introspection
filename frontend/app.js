@@ -23,11 +23,16 @@ const PROTO_COLORS = {
 };
 const ERROR_COLOR = '#d03b3b';
 const OTHER_COLOR = '#8b949e';
+const MARKER_COLOR = '#fab219';   /* user marker lines/flags on the timeline */
 const MONO_FONT = 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace';
 
 const TOKEN_KEY = 'avb.token';
 const USER_KEY = 'avb.user';
+const ROLE_KEY = 'avb.role';    /* cached /api/me role: 'admin' | 'user' */
 const TIME_MODE_KEY = 'avb.timeMode';   /* 'rel' | 'tod' */
+const SPLIT_KEY = 'avb.split';          /* events/inspector pane split, % */
+const LANEH_KEY = 'avb.tl.laneH';       /* timeline lane height, px */
+const MARKERS_KEY_PREFIX = 'avb.markers.';   /* + session id -> JSON array */
 const ROW_H = 24;               /* events table row height, px (matches CSS) */
 
 /* exact 17-char colon-separated MAC (used to decorate inspector field values) */
@@ -203,6 +208,7 @@ function mdToHtml(src) {
 
 let token = localStorage.getItem(TOKEN_KEY) || '';
 let username = localStorage.getItem(USER_KEY) || '';
+let role = localStorage.getItem(ROLE_KEY) || '';   /* '' until /api/me answers */
 let pendingHash = '';
 
 function setAuth(tok, user) {
@@ -214,8 +220,34 @@ function setAuth(tok, user) {
   } else {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    setRole('');
   }
   updateUserbox();
+}
+
+function setRole(r) {
+  role = r || '';
+  if (token && role) localStorage.setItem(ROLE_KEY, role);
+  else localStorage.removeItem(ROLE_KEY);
+  updateUserbox();
+}
+
+/* fetch + cache the caller's role (login & boot); re-renders a waiting
+   #/admin view once the role becomes known */
+async function refreshRole() {
+  if (!token) return;
+  try {
+    const me = await api('/api/me');
+    if (!me || !token) return;
+    if (me.username && me.username !== username) {
+      username = me.username;
+      localStorage.setItem(USER_KEY, username);
+      updateUserbox();
+    }
+    const prev = role;
+    setRole(me.role || '');
+    if (role !== prev && parseRoute().view === 'admin') render();
+  } catch (err) { /* 401 already handled by api() */ }
 }
 
 function authLost() {
@@ -263,7 +295,10 @@ async function api(path, opts) {
   let body = null;
   try { body = await res.json(); } catch (err) { body = null; }
   if (!res.ok) {
-    throw new Error((body && body.error) ? body.error : (res.status + ' ' + res.statusText));
+    const err = new Error((body && body.error) ? body.error : (res.status + ' ' + res.statusText));
+    err.status = res.status;   /* callers branch on 409 (notes conflict flow) */
+    err.body = body;
+    throw err;
   }
   return body;
 }
@@ -277,9 +312,107 @@ async function doLogout() {
 function updateUserbox() {
   const box = document.getElementById('userbox');
   const name = document.getElementById('user-name');
-  if (!box || !name) return;
-  box.hidden = !token;
-  name.textContent = username;
+  if (box && name) {
+    box.hidden = !token;
+    name.textContent = username;
+  }
+  const adminLink = document.getElementById('admin-link');
+  if (adminLink) adminLink.hidden = !(token && role === 'admin');
+  const presenceWrap = document.getElementById('presence-wrap');
+  if (presenceWrap) {
+    presenceWrap.hidden = !token;
+    if (!token) {
+      presenceData = [];
+      setPresenceOpen(false);
+      renderPresence();
+    }
+  }
+}
+
+/* ────────────────────────── presence ──────────────────────────
+   Heartbeat (PUT /api/presence {view}) every 10 s while logged in, plus
+   immediately on route/tab changes; the topbar chip (#presence) shows the
+   online count and its popover (#presence-list) shows who looks at what. */
+
+let presenceViewLabel = '';   /* 'home' | 'session/<id>[:notes]' | 'admin' | '' */
+let presenceData = [];        /* last GET /api/presence entries */
+let presenceOpen = false;
+
+/* view label -> human wording (kept in sync with the Playwright suite):
+   home -> "home" · admin -> "admin panel" · session/s1 -> "session s1"
+   session/s1:notes -> "session s1 (notes)" · anything else verbatim */
+function humanizeView(v) {
+  const s = String(v || '');
+  if (s === 'home') return 'home';
+  if (s === 'admin') return 'admin panel';
+  let m = s.match(/^session\/(.+):notes$/);
+  if (m) return 'session ' + m[1] + ' (notes)';
+  m = s.match(/^session\/(.+)$/);
+  if (m) return 'session ' + m[1];
+  return s || '—';
+}
+
+function setPresenceView(v) {
+  if (v === presenceViewLabel) return;
+  presenceViewLabel = v;
+  if (token && v) {           /* immediate beat on route/tab change */
+    presenceBeat();
+    presencePull();
+  }
+}
+
+async function presenceBeat() {
+  if (!token || !presenceViewLabel) return;
+  try {
+    await api('/api/presence', { method: 'PUT', json: { view: presenceViewLabel } });
+  } catch (err) { /* best-effort heartbeat; a 401 already routed to login */ }
+}
+
+async function presencePull() {
+  if (!token) return;
+  try {
+    const r = await api('/api/presence');
+    presenceData = (r && r.users) || [];
+  } catch (err) {
+    return;                   /* keep the last good list on transient errors */
+  }
+  renderPresence();
+}
+
+function presenceTick() {     /* 10 s cadence, started once at boot */
+  if (!token) return;
+  presenceBeat();
+  presencePull();
+}
+
+function renderPresence() {
+  const cnt = document.getElementById('presence-count');
+  if (cnt) cnt.textContent = presenceData.length + ' online';
+  const list = document.getElementById('presence-list');
+  if (!list) return;
+  if (!presenceData.length) {
+    list.replaceChildren(h('div', { class: 'empty small' }, 'nobody online'));
+    return;
+  }
+  list.replaceChildren(...presenceData.map((u) => h('div', {
+    class: 'presence-entry' + (u.username === username ? ' me' : ''),
+    dataset: { user: u.username || '', view: u.view || '' },
+    title: (u.username || '?') + ' — ' + (u.view || '')
+      + (typeof u.idle_s === 'number' ? ' · idle ' + u.idle_s.toFixed(1) + ' s' : ''),
+  },
+    h('span', { class: 'pe-user' }, u.username || '?'),
+    h('span', { class: 'pe-sep' }, ' — '),
+    h('span', { class: 'pe-view' }, humanizeView(u.view)),
+  )));
+}
+
+function setPresenceOpen(open) {
+  presenceOpen = !!open && !!token;
+  const list = document.getElementById('presence-list');
+  const btn = document.getElementById('presence');
+  if (list) list.hidden = !presenceOpen;
+  if (btn) btn.setAttribute('aria-expanded', presenceOpen ? 'true' : 'false');
+  if (presenceOpen) presencePull();   /* refresh whenever the popover opens */
 }
 
 /* ────────────────────────── router ────────────────────────── */
@@ -292,6 +425,7 @@ function parseRoute() {
     return { view: 'session', id: decodeURIComponent(hash.slice('#/session/'.length)) };
   }
   if (hash === '#/home') return { view: 'home' };
+  if (hash === '#/admin') return { view: 'admin' };
   if (hash === '#/login') return { view: 'login' };
   return { view: token ? 'home' : 'login' };
 }
@@ -315,9 +449,19 @@ function render() {
     return;
   }
   updateUserbox();
-  if (r.view === 'login') currentView = loginView(app);
-  else if (r.view === 'session') currentView = sessionView(app, r.id);
-  else currentView = homeView(app);
+  if (r.view === 'login') {
+    setPresenceView('');
+    currentView = loginView(app);
+  } else if (r.view === 'session') {
+    setPresenceView('session/' + r.id);
+    currentView = sessionView(app, r.id);
+  } else if (r.view === 'admin') {
+    setPresenceView('admin');
+    currentView = adminView(app);
+  } else {
+    setPresenceView('home');
+    currentView = homeView(app);
+  }
 }
 
 /* ────────────────────────── login view ────────────────────────── */
@@ -371,6 +515,7 @@ function loginView(app) {
       }
       const r = await api('/api/login', { method: 'POST', json: { username: u, password: p }, auth: false });
       setAuth(r.token, r.username || u);
+      await refreshRole();   /* role known before routing (e.g. into #/admin) */
       const dest = (pendingHash && pendingHash.startsWith('#/') && pendingHash !== '#/login') ? pendingHash : '#/home';
       pendingHash = '';
       navigate(dest);
@@ -548,28 +693,8 @@ function homeView(app) {
     }));
   }
 
-  function metric(label, value, title) {
-    return h('div', { class: 'metric', title: title || '' },
-      h('div', { class: 'm-label' }, label),
-      h('div', { class: 'm-value mono' }, value),
-    );
-  }
-
   function renderMetrics(m) {
-    if (!m || !m.process) { metricsBox.replaceChildren(); return; }
-    const pr = m.process;
-    const pool = m.pool || {};
-    const cpu = (pr.cpu_user_s || 0) + (pr.cpu_sys_s || 0);
-    metricsBox.replaceChildren(
-      metric('CPU', cpu.toFixed(1) + ' s', 'user ' + (pr.cpu_user_s || 0) + ' s + sys ' + (pr.cpu_sys_s || 0) + ' s'),
-      metric('RSS', ((pr.rss_kb || 0) / 1024).toFixed(1) + ' MB'),
-      metric('Uptime', fmtUptime(pr.uptime_s)),
-      metric('Threads', String(pr.threads !== undefined ? pr.threads : '—')),
-      metric('Pool', (pool.active || 0) + ' active / ' + (pool.threads || 0) + ' (max ' + (pool.max_threads || 0) + ')'),
-      metric('Queued', fmtInt(pool.queued)),
-      metric('Clients', fmtInt((m.clients || []).length)),
-      metric('Sessions', fmtInt((m.sessions || []).length)),
-    );
+    metricsBox.replaceChildren(...metricTiles(m));
   }
 
   async function refresh() {
@@ -619,6 +744,228 @@ function sessionStatusBadge(s) {
   else if (st === 'done') cls = 'st-good';
   else if (st === 'error') cls = 'st-bad';
   return h('span', { class: 'sbadge ' + cls, title: st === 'error' ? (s.error || '') : '' }, st || '?');
+}
+
+/* ────────────────────────── shared render helpers ──────────────────────────
+   (used by the home, session and admin views) */
+
+function metric(label, value, title) {
+  return h('div', { class: 'metric', title: title || '' },
+    h('div', { class: 'm-label' }, label),
+    h('div', { class: 'm-value mono' }, value),
+  );
+}
+
+/* GET /api/metrics payload -> the home/admin metrics-strip tiles */
+function metricTiles(m) {
+  if (!m || !m.process) return [];
+  const pr = m.process;
+  const pool = m.pool || {};
+  const cpu = (pr.cpu_user_s || 0) + (pr.cpu_sys_s || 0);
+  return [
+    metric('CPU', cpu.toFixed(1) + ' s', 'user ' + (pr.cpu_user_s || 0) + ' s + sys ' + (pr.cpu_sys_s || 0) + ' s'),
+    metric('RSS', ((pr.rss_kb || 0) / 1024).toFixed(1) + ' MB'),
+    metric('Uptime', fmtUptime(pr.uptime_s)),
+    metric('Threads', String(pr.threads !== undefined ? pr.threads : '—')),
+    metric('Pool', (pool.active || 0) + ' active / ' + (pool.threads || 0) + ' (max ' + (pool.max_threads || 0) + ')'),
+    metric('Queued', fmtInt(pool.queued)),
+    metric('Clients', fmtInt((m.clients || []).length)),
+    metric('Sessions', fmtInt((m.sessions || []).length)),
+  ];
+}
+
+function stateClass(sName) {
+  const u = String(sName || '').toUpperCase();
+  if (u.includes('FAIL') || u.includes('TIMED_OUT') || u === 'LOST'
+    || u === 'MISMATCH' || u === 'NOT_AS_CAPABLE' || u.includes('ERROR')) return 'st-bad';
+  if (u === 'DEFENDING') return 'st-serious';
+  if (u === 'AVAILABLE' || u === 'ESTABLISHED' || u === 'REGISTERED' || u === 'ACQUIRED'
+    || u === 'CONNECTED' || u === 'READY' || u === 'SUCCESS' || u === 'ADVERTISE'
+    || u === 'HEALTHY' || u === 'MATCH' || u === 'GM_PRESENT'
+    || u === 'AS_CAPABLE' || u === 'MASTER') return 'st-good';
+  if (u === 'PENDING' || u === 'PROBING' || u === 'CONNECTING' || u === 'LEAVING'
+    || u === 'DEPARTING' || u === 'DISCONNECTING' || u === 'NO_GM'
+    || u.includes('ASKING')) return 'st-warn';
+  return 'st-neutral';
+}
+
+function stateBadge(sName, small) {
+  return h('span', { class: 'sbadge ' + stateClass(sName) + (small ? ' sm' : '') }, String(sName));
+}
+
+function kvList(pairs) {
+  const kids = [];
+  for (const pair of pairs) {
+    if (!pair) continue;
+    const [k, v] = pair;
+    if (v === undefined || v === null || v === '') continue;
+    kids.push(h('span', { class: 'kv' },
+      h('span', { class: 'kv-k' }, k + ' '),
+      v instanceof Node ? v : h('span', { class: 'kv-v mono' }, String(v))));
+  }
+  return kids.length ? h('div', { class: 'sobj-kv' }, kids) : null;
+}
+
+/* ────────────────────────── admin view ────────────────────────── */
+
+function adminView(app) {
+  if (role !== 'admin') {
+    /* the API 403s anyway — mirror it with an explicit empty state */
+    app.appendChild(h('div', { class: 'home admin' },
+      h('div', { class: 'empty' }, 'admin role required')));
+    return { destroy() {} };
+  }
+
+  let alive = true;
+  let timer = 0;
+
+  const metricsBox = h('div', { class: 'metrics-strip' });
+  const usersBox = h('div', { class: 'admin-users' },
+    h('div', { class: 'empty' }, 'Loading…'));
+  const presBox = h('div', { class: 'admin-presence' },
+    h('div', { class: 'empty' }, 'Loading…'));
+
+  /* create-user form */
+  const newUser = h('input', {
+    id: 'admin-new-user', class: 'input input-sm mono', placeholder: 'username',
+    spellcheck: 'false', autocomplete: 'off',
+  });
+  const newPass = h('input', {
+    id: 'admin-new-pass', class: 'input input-sm', type: 'password',
+    placeholder: 'password (≥ 8 chars)', autocomplete: 'new-password',
+  });
+  const newRole = h('select', { id: 'admin-new-role', class: 'input input-sm' },
+    h('option', { value: 'user' }, 'user'),
+    h('option', { value: 'admin' }, 'admin'));
+  const createBtn = h('button', {
+    id: 'admin-create', class: 'btn btn-primary btn-sm', type: 'submit',
+  }, 'Create user');
+  const createForm = h('form', { class: 'admin-create-form', onsubmit: createUser },
+    newUser, newPass, newRole, createBtn);
+
+  app.appendChild(
+    h('div', { class: 'home admin' },
+      metricsBox,
+      h('section', { class: 'panel' },
+        h('div', { class: 'panel-head' }, h('h2', null, 'Users')),
+        h('div', { class: 'au-head' },
+          h('span', null, 'Username'), h('span', null, 'Role'),
+          h('span', null, 'Online'), h('span', null, '')),
+        usersBox,
+        createForm,
+      ),
+      h('section', { class: 'panel' },
+        h('div', { class: 'panel-head' }, h('h2', null, 'Presence'),
+          h('span', { class: 'dim small' }, 'one entry per login session · 60 s expiry')),
+        h('div', { class: 'ap-head' },
+          h('span', null, 'Username'), h('span', null, 'View'),
+          h('span', { class: 'num' }, 'Idle')),
+        presBox,
+      ),
+    ),
+  );
+
+  async function createUser(ev) {
+    ev.preventDefault();
+    const u = newUser.value.trim();
+    const p = newPass.value;
+    if (!u || !p) { toast('username and password are required', 'error'); return; }
+    createBtn.disabled = true;
+    try {
+      await api('/api/admin/users', {
+        method: 'POST', json: { username: u, password: p, role: newRole.value },
+      });
+      toast('user ' + u + ' created (' + newRole.value + ')');
+      newUser.value = '';
+      newPass.value = '';
+      refresh();
+    } catch (err) {
+      toast('create user: ' + err.message, 'error');
+    } finally {
+      createBtn.disabled = false;
+    }
+  }
+
+  async function deleteUser(name) {
+    if (!window.confirm('Delete user "' + name + '"? Their tokens are revoked immediately.')) return;
+    try {
+      await api('/api/admin/users/' + encodeURIComponent(name), { method: 'DELETE' });
+      toast('user ' + name + ' deleted');
+      refresh();
+    } catch (err) {
+      toast('delete user: ' + err.message, 'error');
+    }
+  }
+
+  function renderUsers(users) {
+    if (!users.length) {
+      usersBox.replaceChildren(h('div', { class: 'empty' }, 'No users.'));
+      return;
+    }
+    usersBox.replaceChildren(...users.map((u) => {
+      const self = u.username === username;
+      const del = h('button', {
+        class: 'btn btn-danger btn-sm admin-del', type: 'button',
+        dataset: { user: u.username || '' },
+        disabled: self,
+        title: self ? 'you cannot delete your own account' : 'delete ' + u.username,
+      }, 'Delete');
+      if (!self) del.addEventListener('click', () => deleteUser(u.username));
+      return h('div', { class: 'aurow', dataset: { user: u.username || '' } },
+        h('span', { class: 'au-name mono' }, u.username || ''),
+        h('span', null, h('span', {
+          class: 'sbadge ' + (u.role === 'admin' ? 'st-warn' : 'st-neutral'),
+        }, u.role || 'user')),
+        h('span', { class: 'au-online' },
+          h('span', { class: 'online-dot' + (u.online ? ' on' : '') }),
+          u.online
+            ? h('span', { class: 'au-view' }, humanizeView(u.view))
+            : h('span', { class: 'dim' }, 'offline')),
+        h('span', { class: 'au-actions' }, del),
+      );
+    }));
+  }
+
+  function renderPresenceTable(entries) {
+    if (!entries.length) {
+      presBox.replaceChildren(h('div', { class: 'empty' }, 'Nobody online.'));
+      return;
+    }
+    presBox.replaceChildren(...entries.map((u) => h('div', {
+      class: 'aprow' + (u.username === username ? ' me' : ''),
+      dataset: { user: u.username || '', view: u.view || '' },
+    },
+      h('span', { class: 'mono' }, u.username || ''),
+      h('span', null, humanizeView(u.view)),
+      h('span', { class: 'num mono' },
+        typeof u.idle_s === 'number' ? u.idle_s.toFixed(1) + ' s' : '—'),
+    )));
+  }
+
+  async function refresh() {
+    if (!alive) return;
+    const results = await Promise.allSettled([
+      api('/api/admin/users'),
+      api('/api/presence'),
+      api('/api/metrics'),
+    ]);
+    if (!alive) return;
+    if (results[0].status === 'fulfilled') renderUsers(results[0].value.users || []);
+    else usersBox.replaceChildren(h('div', { class: 'empty errtext' }, results[0].reason.message));
+    if (results[1].status === 'fulfilled') renderPresenceTable(results[1].value.users || []);
+    else presBox.replaceChildren(h('div', { class: 'empty errtext' }, results[1].reason.message));
+    if (results[2].status === 'fulfilled') metricsBox.replaceChildren(...metricTiles(results[2].value));
+  }
+
+  refresh();
+  timer = setInterval(refresh, 10000);
+
+  return {
+    destroy() {
+      alive = false;
+      clearInterval(timer);
+    },
+  };
 }
 
 /* ────────────────────────── session view ────────────────────────── */
@@ -1169,12 +1516,14 @@ function sessionView(app, id) {
   /* ────────── inspector: packet + transition detail ────────── */
 
   function setTab(t) {
-    if (S.tab === 'notes' && t !== 'notes' && N.dirty) saveNotes();   /* auto-save on leave */
+    /* auto-save on leave — but never while a conflict awaits a decision */
+    if (S.tab === 'notes' && t !== 'notes' && N.dirty && !N.conflict) saveNotes();
     S.tab = t;
     tabInspBtn.classList.toggle('active', t === 'inspect');
     tabStateBtn.classList.toggle('active', t === 'state');
     tabNotesBtn.classList.toggle('active', t === 'notes');
     tabInfoBtn.classList.toggle('active', t === 'info');
+    setPresenceView(t === 'notes' ? 'session/' + id + ':notes' : 'session/' + id);
     renderInspector();
   }
 
@@ -1343,25 +1692,7 @@ function sessionView(app, id) {
   }
 
   /* ────────── inspector: state tab ────────── */
-
-  function stateClass(sName) {
-    const u = String(sName || '').toUpperCase();
-    if (u.includes('FAIL') || u.includes('TIMED_OUT') || u === 'LOST'
-      || u === 'MISMATCH' || u === 'NOT_AS_CAPABLE' || u.includes('ERROR')) return 'st-bad';
-    if (u === 'DEFENDING') return 'st-serious';
-    if (u === 'AVAILABLE' || u === 'ESTABLISHED' || u === 'REGISTERED' || u === 'ACQUIRED'
-      || u === 'CONNECTED' || u === 'READY' || u === 'SUCCESS' || u === 'ADVERTISE'
-      || u === 'HEALTHY' || u === 'MATCH' || u === 'GM_PRESENT'
-      || u === 'AS_CAPABLE' || u === 'MASTER') return 'st-good';
-    if (u === 'PENDING' || u === 'PROBING' || u === 'CONNECTING' || u === 'LEAVING'
-      || u === 'DEPARTING' || u === 'DISCONNECTING' || u === 'NO_GM'
-      || u.includes('ASKING')) return 'st-warn';
-    return 'st-neutral';
-  }
-
-  function stateBadge(sName, small) {
-    return h('span', { class: 'sbadge ' + stateClass(sName) + (small ? ' sm' : '') }, String(sName));
-  }
+  /* (stateClass/stateBadge/kvList are module-level, shared with the admin view) */
 
   function historyBlock(hist) {
     if (!Array.isArray(hist) || !hist.length) return null;
@@ -1380,19 +1711,6 @@ function sessionView(app, id) {
         )),
       ),
     );
-  }
-
-  function kvList(pairs) {
-    const kids = [];
-    for (const pair of pairs) {
-      if (!pair) continue;
-      const [k, v] = pair;
-      if (v === undefined || v === null || v === '') continue;
-      kids.push(h('span', { class: 'kv' },
-        h('span', { class: 'kv-k' }, k + ' '),
-        v instanceof Node ? v : h('span', { class: 'kv-v mono' }, String(v))));
-    }
-    return kids.length ? h('div', { class: 'sobj-kv' }, kids) : null;
   }
 
   function sobj(title, badge, kv, extra, history) {
@@ -1665,7 +1983,11 @@ function sessionView(app, id) {
 
   /* ────────── inspector: notes tab ────────── */
 
-  const N = { loaded: false, loading: false, dirty: false, saving: false, preview: false };
+  const N = {
+    loaded: false, loading: false, dirty: false, saving: false, preview: false,
+    rev: '',          /* revision the editor content is based on (GET/PUT) */
+    conflict: null,   /* {rev, markdown} from a 409, while the banner is up */
+  };
 
   const notesStatus = h('span', {
     id: 'notes-status', class: 'notes-status dim small', dataset: { state: 'loading' },
@@ -1683,23 +2005,80 @@ function sessionView(app, id) {
     placeholder: 'Investigation notes (markdown)…',
   });
   const notesPreview = h('div', { id: 'notes-preview', class: 'notes-preview', hidden: true });
+  const notesConflict = h('div', { id: 'notes-conflict', class: 'notes-conflict', hidden: true },
+    h('span', { class: 'nc-msg' },
+      'Someone else saved these notes while you were editing. Your text below is kept, but not saved yet.'),
+    h('span', { class: 'nc-actions' },
+      h('button', {
+        id: 'notes-take-theirs', class: 'btn btn-sm', type: 'button',
+        title: 'discard my text and load their version', onclick: takeTheirs,
+      }, 'Take theirs'),
+      h('button', {
+        id: 'notes-overwrite', class: 'btn btn-danger btn-sm', type: 'button',
+        title: 'force-save my text over their version', onclick: overwriteWithMine,
+      }, 'Overwrite with mine')));
   const notesWrap = h('div', { class: 'notes-wrap' },
     h('div', { class: 'notes-toolbar' },
       notesSaveBtn, notesPreviewBtn,
       h('span', { class: 'toolbar-spacer' }),
       notesStatus),
-    notesTa, notesPreview,
+    notesConflict, notesTa, notesPreview,
   );
   notesTa.addEventListener('input', () => {
     N.dirty = true;
-    if (!N.saving) setNotesStatus('dirty');
+    /* while the conflict banner is up the status stays "conflict" */
+    if (!N.saving && !N.conflict) setNotesStatus('dirty');
   });
 
   function setNotesStatus(state, msg) {
-    const text = { saved: 'saved', dirty: 'unsaved changes', saving: 'saving…', loading: 'loading…' };
+    const text = {
+      saved: 'saved', dirty: 'unsaved changes', saving: 'saving…',
+      loading: 'loading…', conflict: 'edit conflict',
+    };
     notesStatus.dataset.state = state;
     notesStatus.classList.toggle('errtext', state === 'error');
     notesStatus.textContent = state === 'error' ? (msg || 'save failed') : text[state];
+  }
+
+  function clearConflict() {
+    N.conflict = null;
+    notesConflict.hidden = true;
+  }
+
+  /* 409 resolution A: replace my text with the server's current revision */
+  function takeTheirs() {
+    if (!N.conflict) return;
+    notesTa.value = N.conflict.markdown;
+    N.rev = N.conflict.rev;
+    clearConflict();
+    N.dirty = false;
+    setNotesStatus('saved');
+    if (N.preview) notesPreview.innerHTML = mdToHtml(notesTa.value);
+  }
+
+  /* 409 resolution B: force-save my text (PUT without rev = last write wins) */
+  async function overwriteWithMine() {
+    if (!N.conflict || N.saving || S.closed) return;
+    N.saving = true;
+    notesSaveBtn.disabled = true;
+    setNotesStatus('saving');
+    const text = notesTa.value;
+    try {
+      const r = await api('/api/sessions/' + encodeURIComponent(id) + '/notes', {
+        method: 'PUT', json: { markdown: text },
+      });
+      if (S.closed) return;
+      if (r && typeof r.rev === 'string') N.rev = r.rev;
+      clearConflict();
+      N.dirty = notesTa.value !== text;     /* stay dirty if edited mid-flight */
+      setNotesStatus(N.dirty ? 'dirty' : 'saved');
+    } catch (err) {
+      if (S.closed) return;
+      setNotesStatus('error', 'save failed: ' + err.message);
+    } finally {
+      N.saving = false;
+      notesSaveBtn.disabled = !N.loaded;
+    }
   }
 
   function renderNotesTab() {
@@ -1715,6 +2094,8 @@ function sessionView(app, id) {
       const r = await api('/api/sessions/' + encodeURIComponent(id) + '/notes');
       if (S.closed) return;
       notesTa.value = (r && typeof r.markdown === 'string') ? r.markdown : '';
+      N.rev = (r && typeof r.rev === 'string') ? r.rev : '';
+      clearConflict();
       N.loaded = true;
       N.dirty = false;
       notesTa.disabled = false;
@@ -1734,17 +2115,29 @@ function sessionView(app, id) {
     notesSaveBtn.disabled = true;
     setNotesStatus('saving');
     const text = notesTa.value;
+    /* revision-based save: the backend 409s when someone saved in between */
+    const payload = N.rev ? { markdown: text, rev: N.rev } : { markdown: text };
     try {
-      await api('/api/sessions/' + encodeURIComponent(id) + '/notes', {
-        method: 'PUT', json: { markdown: text },
+      const r = await api('/api/sessions/' + encodeURIComponent(id) + '/notes', {
+        method: 'PUT', json: payload,
       });
       if (S.closed) return;
+      if (r && typeof r.rev === 'string') N.rev = r.rev;
+      clearConflict();
       N.dirty = notesTa.value !== text;     /* stay dirty if edited mid-flight */
       setNotesStatus(N.dirty ? 'dirty' : 'saved');
     } catch (err) {
       if (S.closed) return;
-      setNotesStatus('error', 'save failed: ' + err.message);
-      if (S.tab !== 'notes') toast('notes save failed: ' + err.message, 'error');
+      if (err.status === 409 && err.body && typeof err.body.markdown === 'string') {
+        /* stale rev: keep the user's text, surface the banner with theirs */
+        N.conflict = { rev: err.body.rev || '', markdown: err.body.markdown };
+        notesConflict.hidden = false;
+        setNotesStatus('conflict');
+        if (S.tab !== 'notes') toast('notes: edit conflict — someone else saved; open the Notes tab to resolve', 'error');
+      } else {
+        setNotesStatus('error', 'save failed: ' + err.message);
+        if (S.tab !== 'notes') toast('notes save failed: ' + err.message, 'error');
+      }
     } finally {
       N.saving = false;
       notesSaveBtn.disabled = !N.loaded;
@@ -2558,20 +2951,26 @@ function boot() {
   const logoutBtn = document.getElementById('logout-btn');
   if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
 
+  /* presence chip: click toggles the popover, hover opens it */
+  const presenceWrap = document.getElementById('presence-wrap');
+  const presenceBtn = document.getElementById('presence');
+  if (presenceWrap && presenceBtn) {
+    presenceBtn.addEventListener('click', () => setPresenceOpen(!presenceOpen));
+    presenceWrap.addEventListener('mouseenter', () => setPresenceOpen(true));
+    presenceWrap.addEventListener('mouseleave', () => setPresenceOpen(false));
+    document.addEventListener('click', (ev) => {
+      if (presenceOpen && !presenceWrap.contains(ev.target)) setPresenceOpen(false);
+    });
+  }
+  setInterval(presenceTick, 10000);   /* heartbeat + list refresh cadence */
+
   window.addEventListener('hashchange', render);
   updateUserbox();
   render();
 
-  /* validate the stored token once so a stale one drops straight to login */
-  if (token) {
-    api('/api/me').then((me) => {
-      if (me && me.username && me.username !== username) {
-        username = me.username;
-        localStorage.setItem(USER_KEY, username);
-        updateUserbox();
-      }
-    }).catch(() => { /* 401 already handled by api() */ });
-  }
+  /* validate the stored token once so a stale one drops straight to login;
+     also learns/refreshes the cached role (shows/hides #admin-link) */
+  refreshRole();
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

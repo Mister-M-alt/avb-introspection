@@ -19,6 +19,7 @@
 #include "../decode/decode.h"
 #include "../net/websocket.h"
 #include "../pcapio/pcap_reader.h"
+#include "../util/crypto_util.h"
 #include "../util/json.h"
 
 namespace avb {
@@ -119,10 +120,14 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
     }
     if (p == "/api/me" && m == "GET") {
         JsonWriter w;
-        w.beginObj().kv("username", user).endObj();
+        w.beginObj().kv("username", user).kv("role", mAuth.roleOf(user)).endObj();
         resp.body = w.take();
         return;
     }
+    if (p == "/api/presence" && m == "PUT")
+        return handlePresencePut(req, user, token, resp);
+    if (p == "/api/presence" && m == "GET") return handlePresenceGet(resp);
+    if (p.rfind("/api/admin/", 0) == 0) return handleAdmin(req, user, resp);
     if (p == "/api/pcaps" && m == "GET") return handlePcapsGet(resp);
     if (p == "/api/pcaps" && m == "POST") return handlePcapsPost(req, resp);
     if (p == "/api/sessions" && m == "GET") return handleSessionsGet(resp);
@@ -443,10 +448,23 @@ void Api::handlePacket(const std::string& id, const std::string& nStr,
 
 // ----------------------------------------------------------------- notes -
 
+namespace {
+
+/** Notes revision: 16 hex chars of SHA-1 over the content. Stateless, so it
+ *  stays consistent across restarts and between concurrent editors. */
+std::string notesRev(const std::string& markdown) {
+    auto d = sha1(std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>(markdown.data()), markdown.size()));
+    return hexDump(std::span<const uint8_t>(d.data(), 8));
+}
+
+} // namespace
+
 void Api::handleNotesGet(const std::string& id, HttpResponse& resp) {
     if (!mEngine.find(id)) return jsonError(resp, 404, "no such session " + id);
+    std::string md = mStore.readNotes(id);
     JsonWriter w;
-    w.beginObj().kv("markdown", mStore.readNotes(id)).endObj();
+    w.beginObj().kv("markdown", md).kv("rev", notesRev(md)).endObj();
     resp.body = w.take();
 }
 
@@ -458,9 +476,33 @@ void Api::handleNotesPut(HttpRequest& req, const std::string& id,
     const JsonValue* md = body.get("markdown");
     if (!md || md->type != JsonValue::Type::String)
         return jsonError(resp, 400, "body must be {\"markdown\": \"...\"}");
+
+    // Optimistic concurrency: when the client sends the revision its edit
+    // was based on, a mismatch means someone else saved in between (409
+    // with the current content so the client can merge). A PUT without
+    // `rev` keeps the old last-write-wins behavior.
+    std::string baseRev = body.getStr("rev");
+    if (!baseRev.empty()) {
+        std::string current = mStore.readNotes(id);
+        std::string currentRev = notesRev(current);
+        if (baseRev != currentRev) {
+            resp.status = 409;
+            JsonWriter w;
+            w.beginObj();
+            w.kv("error", "conflict — the notes were modified by someone else");
+            w.kv("rev", currentRev);
+            w.kv("markdown", current);
+            w.endObj();
+            resp.body = w.take();
+            return;
+        }
+    }
+
     std::string err;
     if (!mStore.writeNotes(id, md->str, err)) return jsonError(resp, 500, err);
-    resp.body = "{\"ok\":true}";
+    JsonWriter w;
+    w.beginObj().kv("ok", true).kv("rev", notesRev(md->str)).endObj();
+    resp.body = w.take();
 }
 
 // ----------------------------------------------------------------- state -
@@ -469,6 +511,113 @@ void Api::handleState(const std::string& id, HttpResponse& resp) {
     auto s = mEngine.find(id);
     if (!s) return jsonError(resp, 404, "no such session " + id);
     resp.body = s->stateJson();
+}
+
+// -------------------------------------------------------------- presence -
+
+void Api::handlePresencePut(HttpRequest& req, const std::string& user,
+                            const std::string& token, HttpResponse& resp) {
+    JsonValue body = JsonValue::parse(req.body);
+    std::string view = body.getStr("view");
+    if (view.size() > 128) view.resize(128);
+    auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lk(mPresenceMu);
+        mPresence[token] = {user, view, now};
+        // Lazy expiry of stale entries (closed tabs, logouts).
+        for (auto it = mPresence.begin(); it != mPresence.end();) {
+            if (now - it->second.seen > std::chrono::seconds(60))
+                it = mPresence.erase(it);
+            else
+                ++it;
+        }
+    }
+    resp.body = "{\"ok\":true}";
+}
+
+void Api::handlePresenceGet(HttpResponse& resp) {
+    auto now = std::chrono::steady_clock::now();
+    JsonWriter w;
+    w.beginObj().key("users").beginArr();
+    {
+        std::lock_guard lk(mPresenceMu);
+        for (auto& [token, pr] : mPresence) {
+            double idle = std::chrono::duration<double>(now - pr.seen).count();
+            if (idle > 60) continue;
+            w.beginObj();
+            w.kv("username", pr.user);
+            w.kv("view", pr.view);
+            w.kv("idle_s", idle);
+            w.endObj();
+        }
+    }
+    w.endArr().endObj();
+    resp.body = w.take();
+}
+
+// ----------------------------------------------------------------- admin -
+
+void Api::handleAdmin(HttpRequest& req, const std::string& user,
+                      HttpResponse& resp) {
+    if (mAuth.roleOf(user) != "admin")
+        return jsonError(resp, 403, "admin role required");
+    const std::string& p = req.path;
+    const std::string& m = req.method;
+
+    if (p == "/api/admin/users" && m == "GET") {
+        // Presence snapshot keyed by user for the online/view columns.
+        std::map<std::string, std::pair<std::string, double>> online;
+        auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard lk(mPresenceMu);
+            for (auto& [token, pr] : mPresence) {
+                double idle =
+                    std::chrono::duration<double>(now - pr.seen).count();
+                if (idle > 60) continue;
+                auto it = online.find(pr.user);
+                if (it == online.end() || idle < it->second.second)
+                    online[pr.user] = {pr.view, idle};
+            }
+        }
+        JsonWriter w;
+        w.beginObj().key("users").beginArr();
+        for (auto& u : mAuth.users()) {
+            w.beginObj();
+            w.kv("username", u.username);
+            w.kv("role", u.role);
+            auto it = online.find(u.username);
+            w.kv("online", it != online.end());
+            w.kv("view", it != online.end() ? it->second.first : "");
+            w.endObj();
+        }
+        w.endArr().endObj();
+        resp.body = w.take();
+        return;
+    }
+    if (p == "/api/admin/users" && m == "POST") {
+        JsonValue body = JsonValue::parse(req.body);
+        std::string err;
+        if (!mAuth.registerUser(body.getStr("username"),
+                                body.getStr("password"), err,
+                                body.getStr("role", "user")))
+            return jsonError(resp, err == "username already exists" ? 409 : 400,
+                             err);
+        resp.status = 201;
+        resp.body = "{\"ok\":true}";
+        return;
+    }
+    const std::string prefix = "/api/admin/users/";
+    if (p.rfind(prefix, 0) == 0 && m == "DELETE") {
+        std::string name = p.substr(prefix.size());
+        if (name == user)
+            return jsonError(resp, 400, "cannot delete your own account");
+        std::string err;
+        if (!mAuth.deleteUser(name, err))
+            return jsonError(resp, err == "no such user" ? 404 : 400, err);
+        resp.body = "{\"ok\":true}";
+        return;
+    }
+    jsonError(resp, 404, "no such admin endpoint: " + m + " " + p);
 }
 
 // ------------------------------------------------------------------ info -

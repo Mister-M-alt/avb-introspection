@@ -33,7 +33,45 @@ Response: `{"ok": true}` (token invalidated).
 
 ### GET /api/me
 
-Response: `{"username": "alex"}`
+Response: `{"username": "alex", "role": "user"}` (role: `"admin" | "user"`).
+
+## Presence
+
+Lets every user see who is connected and what they are looking at.
+
+### PUT /api/presence
+
+Heartbeat, sent by the frontend every ~10 s and on view changes.
+Request: `{"view": "session/s1"}` (free-form label ≤ 128 chars; conventions:
+`home`, `session/<id>`, `session/<id>:notes`, `admin`).
+Response: `{"ok": true}`. Entries expire after 60 s without a heartbeat.
+
+### GET /api/presence
+
+Response: `{"users": [{"username": "alex", "view": "session/s1",
+"idle_s": 3.2}]}` — one entry per active login session.
+
+## Admin
+
+All `/api/admin/*` endpoints require the `admin` role (403 otherwise).
+The deployment provisions the first admin from the environment:
+`AVB_ADMIN_USER` (created as admin, or promoted if the account exists) and
+`AVB_ADMIN_PASSWORD` (used only when the account is being created).
+
+### GET /api/admin/users
+
+`{"users": [{"username": "alex", "role": "user", "online": true,
+"view": "session/s1"}]}`
+
+### POST /api/admin/users
+
+Request: `{"username": "bob", "password": "…", "role": "user" | "admin"}`
+Response 201: `{"ok": true}`. 409 when the name exists.
+
+### DELETE /api/admin/users/{username}
+
+Response: `{"ok": true}` (revokes the user's tokens). 400 when targeting
+your own account or the last admin.
 
 ## Pcap management
 
@@ -138,12 +176,18 @@ investigation template at session creation).
 
 ### GET /api/sessions/{id}/notes
 
-Response: `{"markdown": "# Investigation: trace.pcap\n\n..."}`
+Response: `{"markdown": "# Investigation: trace.pcap\n\n...",
+"rev": "a1b2c3d4e5f60708"}` — `rev` identifies the content revision
+(16 hex chars).
 
 ### PUT /api/sessions/{id}/notes
 
-Request: `{"markdown": "<full replacement content>"}` (≤ 1 MiB).
-Response: `{"ok": true}`. 400 when `markdown` is missing or not a string.
+Request: `{"markdown": "<full replacement content>", "rev": "<the rev the
+edit was based on>"}` (≤ 1 MiB). With a matching `rev` the save succeeds:
+`{"ok": true, "rev": "<new rev>"}`. With a stale `rev` (someone else saved
+in between): **409** `{"error": "...", "rev": "<current>",
+"markdown": "<current content>"}` so the client can merge. Omitting `rev`
+skips the check (last write wins). 400 when `markdown` is missing.
 
 ## Session info & devices
 

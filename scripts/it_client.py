@@ -230,12 +230,22 @@ def phase_main():
     st, nt = req("GET", f"/api/sessions/{sid}/notes", token=token)
     check(st == 200 and nt["markdown"].startswith("# Investigation:"),
           "notes seeded with template")
+    check(len(nt.get("rev", "")) == 16, "notes carry a revision")
+    rev0 = nt["rev"]
     edited = "# My notes\n\n- edited via integration test\n"
-    st, _ = req("PUT", f"/api/sessions/{sid}/notes", {"markdown": edited},
-                token=token)
-    check(st == 200, "notes saved")
+    st, r = req("PUT", f"/api/sessions/{sid}/notes",
+                {"markdown": edited, "rev": rev0}, token=token)
+    check(st == 200 and r["rev"] != rev0, "notes saved with matching rev")
     st, nt = req("GET", f"/api/sessions/{sid}/notes", token=token)
     check(nt["markdown"] == edited, "notes round-trip")
+    # A concurrent editor still holding rev0 must get a conflict, not a
+    # silent overwrite.
+    st, conflict = req("PUT", f"/api/sessions/{sid}/notes",
+                       {"markdown": "# clobber\n", "rev": rev0}, token=token)
+    check(st == 409 and conflict["markdown"] == edited,
+          "stale rev -> 409 with current content")
+    st, nt = req("GET", f"/api/sessions/{sid}/notes", token=token)
+    check(nt["markdown"] == edited, "conflict did not overwrite")
     st, _ = req("PUT", f"/api/sessions/{sid}/notes", {"nope": 1}, token=token)
     check(st == 400, "bad notes body -> 400")
 
@@ -272,6 +282,45 @@ def phase_main():
           "metrics shape (NF-2)")
     check(mx["process"]["rss_kb"] > 0 and mx["pool"]["threads"] >= 1,
           "metrics content")
+
+    # Presence: who is looking at what.
+    st, me = req("GET", "/api/me", token=token)
+    check(me.get("role") == "user", "/api/me carries the role")
+    st, _ = req("PUT", "/api/presence", {"view": f"session/{sid}"}, token=token)
+    check(st == 200, "presence heartbeat")
+    st, pr = req("GET", "/api/presence", token=token)
+    check(any(u["username"] == "alex" and u["view"] == f"session/{sid}"
+              for u in pr["users"]), "presence shows alex in the session")
+
+    # Admin: provisioned from the environment, full user management.
+    st, r = req("POST", "/api/login",
+                {"username": "admin", "password": "admin-pass-123"})
+    check(st == 200, "provisioned admin can log in")
+    atok = r["token"]
+    st, me = req("GET", "/api/me", token=atok)
+    check(me.get("role") == "admin", "admin role provisioned")
+    st, _ = req("GET", "/api/admin/users", token=token)
+    check(st == 403, "non-admin blocked from admin API")
+    st, ul = req("GET", "/api/admin/users", token=atok)
+    users = {u["username"]: u for u in ul["users"]}
+    check("alex" in users and users["alex"]["role"] == "user"
+          and users["alex"]["online"]
+          and users["alex"]["view"] == f"session/{sid}",
+          "admin sees users with presence")
+    st, _ = req("POST", "/api/admin/users",
+                {"username": "temp", "password": "temp-pass-123",
+                 "role": "user"}, token=atok)
+    check(st == 201, "admin creates a user")
+    st, _ = req("POST", "/api/login",
+                {"username": "temp", "password": "temp-pass-123"})
+    check(st == 200, "created user can log in")
+    st, _ = req("DELETE", "/api/admin/users/temp", token=atok)
+    check(st == 200, "admin deletes a user")
+    st, _ = req("POST", "/api/login",
+                {"username": "temp", "password": "temp-pass-123"})
+    check(st == 401, "deleted user cannot log in")
+    st, _ = req("DELETE", "/api/admin/users/admin", token=atok)
+    check(st == 400, "admin cannot delete own account")
 
     # WebSocket: full stream + ping/pong + close after complete.
     got, completed, ponged = 0, False, False
@@ -345,6 +394,12 @@ def phase_after_restart():
     devs = {d["mac"]: d for d in info["devices"]}
     check(devs.get("00:1b:92:00:00:01", {}).get("name") == "FOH Rack",
           "device names survived restart (global store)")
+
+    st, r = req("POST", "/api/login",
+                {"username": "admin", "password": "admin-pass-123"})
+    check(st == 200, "admin account survived restart")
+    st, me = req("GET", "/api/me", token=r["token"])
+    check(me.get("role") == "admin", "admin role survived restart")
     print(f"after_restart phase: {'OK' if FAILS == 0 else f'{FAILS} FAILURES'}")
 
 

@@ -23,6 +23,13 @@ Wants=network-online.target
 Type=simple
 User=avb
 Group=avb
+# Admin provisioning: the account is created as admin on first start (or
+# promoted if it already exists — the password is ignored in that case).
+# Prefer a drop-in (systemctl edit avb-introspectd) or an EnvironmentFile
+# with mode 0600 over editing this unit, so the password stays out of the
+# package:
+#   Environment=AVB_ADMIN_USER=alex
+#   Environment=AVB_ADMIN_PASSWORD=change-me
 ExecStart=/opt/avb-introspection/avb-introspectd \
     --port 8342 \
     --data /var/lib/avb-introspection \

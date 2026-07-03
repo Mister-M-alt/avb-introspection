@@ -78,6 +78,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Deployment admin provisioning: create (or promote) the admin account
+    // from the environment. The password is only used when the account does
+    // not exist yet.
+    const char* adminUser = std::getenv("AVB_ADMIN_USER");
+    const char* adminPass = std::getenv("AVB_ADMIN_PASSWORD");
+    if (adminUser && *adminUser) {
+        if (!auth.ensureAdmin(adminUser, adminPass ? adminPass : "", err))
+            std::fprintf(stderr, "warning: admin provisioning failed: %s\n",
+                         err.c_str());
+        else
+            std::printf("admin account: %s\n", adminUser);
+    }
+
     avb::Engine engine;
 
     // BE-8: sessions survive restarts — re-run analysis from stored pcaps.

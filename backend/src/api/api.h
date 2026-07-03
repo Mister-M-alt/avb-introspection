@@ -54,6 +54,10 @@ private:
     void handleInfo(const std::string& id, HttpResponse&);
     void handleDeviceNamePut(HttpRequest&, HttpResponse&);
     void handleMetrics(HttpResponse&);
+    void handlePresencePut(HttpRequest&, const std::string& user,
+                           const std::string& token, HttpResponse&);
+    void handlePresenceGet(HttpResponse&);
+    void handleAdmin(HttpRequest&, const std::string& user, HttpResponse&);
 
     void streamSession(int fd, const std::string& sessionId,
                        const std::string& user, const std::string& addr);
@@ -66,6 +70,14 @@ private:
     std::string mFrontendDir;
     std::chrono::steady_clock::time_point mStart;
     std::atomic<uint64_t> mUploadSeq{0};
+
+    /** Who is looking at what — in-memory, heartbeat-driven, 60 s expiry. */
+    struct Presence {
+        std::string user, view;
+        std::chrono::steady_clock::time_point seen;
+    };
+    std::mutex mPresenceMu;
+    std::map<std::string, Presence> mPresence; // keyed by token
 };
 
 } // namespace avb

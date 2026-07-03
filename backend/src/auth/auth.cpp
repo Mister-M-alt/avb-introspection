@@ -7,6 +7,7 @@
 #include <sodium.h>
 
 #include <fstream>
+#include <iterator>
 #include <sstream>
 
 #include "../util/json.h"
@@ -44,7 +45,9 @@ bool Auth::init(const std::string& usersFile, std::string& err) {
         for (auto& u : users->arr) {
             std::string name = u.getStr("username");
             std::string hash = u.getStr("hash");
-            if (!name.empty() && !hash.empty()) mUsers[name] = hash;
+            std::string role = u.getStr("role", "user");
+            if (role != "admin") role = "user";
+            if (!name.empty() && !hash.empty()) mUsers[name] = {hash, role};
         }
     }
     return true;
@@ -53,10 +56,11 @@ bool Auth::init(const std::string& usersFile, std::string& err) {
 bool Auth::save(std::string& err) {
     JsonWriter w;
     w.beginObj().key("users").beginArr();
-    for (auto& [name, hash] : mUsers) {
+    for (auto& [name, u] : mUsers) {
         w.beginObj();
         w.kv("username", name);
-        w.kv("hash", hash);
+        w.kv("hash", u.hash);
+        w.kv("role", u.role);
         w.endObj();
     }
     w.endArr().endObj();
@@ -78,7 +82,8 @@ bool Auth::save(std::string& err) {
 }
 
 bool Auth::registerUser(const std::string& username,
-                        const std::string& password, std::string& err) {
+                        const std::string& password, std::string& err,
+                        const std::string& role) {
     if (!validUsername(username)) {
         err = "username must be 3-32 chars of [a-zA-Z0-9_.-]";
         return false;
@@ -99,8 +104,60 @@ bool Auth::registerUser(const std::string& username,
         err = "hashing failed (out of memory?)";
         return false;
     }
-    mUsers[username] = hash;
+    mUsers[username] = {hash, role == "admin" ? "admin" : "user"};
     return save(err);
+}
+
+std::string Auth::roleOf(const std::string& username) const {
+    std::lock_guard lk(mMu);
+    auto it = mUsers.find(username);
+    return it == mUsers.end() ? std::string() : it->second.role;
+}
+
+std::vector<Auth::UserInfo> Auth::users() const {
+    std::lock_guard lk(mMu);
+    std::vector<UserInfo> out;
+    out.reserve(mUsers.size());
+    for (auto& [name, u] : mUsers) out.push_back({name, u.role});
+    return out;
+}
+
+bool Auth::deleteUser(const std::string& username, std::string& err) {
+    std::lock_guard lk(mMu);
+    auto it = mUsers.find(username);
+    if (it == mUsers.end()) {
+        err = "no such user";
+        return false;
+    }
+    if (it->second.role == "admin") {
+        int admins = 0;
+        for (auto& [n, u] : mUsers)
+            if (u.role == "admin") ++admins;
+        if (admins <= 1) {
+            err = "cannot delete the last admin";
+            return false;
+        }
+    }
+    mUsers.erase(it);
+    for (auto t = mTokens.begin(); t != mTokens.end();)
+        t = (t->second == username) ? mTokens.erase(t) : std::next(t);
+    return save(err);
+}
+
+bool Auth::ensureAdmin(const std::string& username,
+                       const std::string& password, std::string& err) {
+    {
+        std::lock_guard lk(mMu);
+        auto it = mUsers.find(username);
+        if (it != mUsers.end()) {
+            if (it->second.role != "admin") {
+                it->second.role = "admin"; // promote the existing account
+                return save(err);
+            }
+            return true;
+        }
+    }
+    return registerUser(username, password, err, "admin");
 }
 
 bool Auth::login(const std::string& username, const std::string& password,
@@ -108,7 +165,7 @@ bool Auth::login(const std::string& username, const std::string& password,
     std::lock_guard lk(mMu);
     auto it = mUsers.find(username);
     if (it == mUsers.end()) return false;
-    if (crypto_pwhash_str_verify(it->second.c_str(), password.c_str(),
+    if (crypto_pwhash_str_verify(it->second.hash.c_str(), password.c_str(),
                                  password.size()) != 0)
         return false;
 

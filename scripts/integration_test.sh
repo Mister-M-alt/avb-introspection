@@ -43,7 +43,8 @@ make -s -j"$(nproc)" "$BIN"
 python3 tools/gen_pcaps.py >/dev/null
 
 echo "== start backend on :$PORT (data: $DATA)"
-"$BIN" --port "$PORT" --data "$DATA" --frontend frontend &
+AVB_ADMIN_USER=admin AVB_ADMIN_PASSWORD=admin-pass-123 \
+    "$BIN" --port "$PORT" --data "$DATA" --frontend frontend &
 PID=$!
 wait_port
 
@@ -52,7 +53,8 @@ python3 scripts/it_client.py "$PORT" main
 echo "== restart backend (BE-8 persistence)"
 kill "$PID"
 wait "$PID" 2>/dev/null || true
-"$BIN" --port "$PORT" --data "$DATA" --frontend frontend &
+AVB_ADMIN_USER=admin AVB_ADMIN_PASSWORD=admin-pass-123 \
+    "$BIN" --port "$PORT" --data "$DATA" --frontend frontend &
 PID=$!
 wait_port
 

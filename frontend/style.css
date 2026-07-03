@@ -100,6 +100,79 @@ body {
 
 #user-name { color: var(--text-2); font-size: 12px; }
 
+#admin-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-decoration: none;
+  padding: 3px 9px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+#admin-link:hover { background: var(--hover); color: var(--text); }
+
+/* presence chip (#presence) + popover (#presence-list) */
+
+#presence-wrap { position: relative; }
+
+#presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 11px var(--sans);
+  letter-spacing: 0.3px;
+  color: var(--text-2);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  padding: 2px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#presence:hover { background: var(--hover); color: var(--text); }
+
+.presence-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--st-good);
+}
+
+#presence-list {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  z-index: 60;
+  min-width: 230px;
+  max-width: 340px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 5px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+}
+
+.presence-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.presence-entry:hover { background: var(--hover); }
+.presence-entry .pe-user { font-family: var(--mono); font-weight: 600; }
+.presence-entry .pe-sep, .presence-entry .pe-view { color: var(--text-2); }
+.presence-entry.me,
+.presence-entry.me .pe-user,
+.presence-entry.me .pe-view,
+.presence-entry.me .pe-sep { color: var(--dim); }   /* your own sessions, dimmed */
+
 #app {
   flex: 1;
   min-height: 0;
@@ -419,6 +492,68 @@ body {
 .srow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .srow-actions { text-align: right; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ── admin view ──────────────────────────────────────────── */
+
+.au-head, .aurow {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) 84px minmax(180px, 1.6fr) 76px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 4px;
+}
+
+.ap-head, .aprow {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(200px, 2fr) 76px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 4px;
+}
+
+.au-head, .ap-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.aurow, .aprow { border-top: 1px solid var(--border); }
+.aurow:first-child, .aprow:first-child { border-top: none; }
+.aurow > span, .aprow > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aprow.me { color: var(--dim); }
+.au-actions { text-align: right; }
+
+.online-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dim);
+  margin-right: 7px;
+  vertical-align: middle;
+}
+.online-dot.on { background: var(--st-good); }
+.au-view { color: var(--text-2); font-size: 12px; }
+
+.admin-create-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-strong);
+}
+.admin-create-form .input { width: 180px; }
+select.input {
+  width: auto;
+  padding: 4px 6px;
+  background: var(--raised);
+  cursor: pointer;
+}
 
 /* ── session view: toolbar ───────────────────────────────── */
 
@@ -997,6 +1132,23 @@ details.history summary {
   text-overflow: ellipsis;
 }
 .notes-status[data-state="dirty"] { color: var(--st-warn); }
+.notes-status[data-state="conflict"] { color: var(--st-serious); }
+
+/* concurrent-edit conflict banner (#notes-conflict), above the editor */
+.notes-conflict {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--st-serious);
+  background: rgba(236, 131, 90, 0.10);
+  border-bottom: 1px solid rgba(236, 131, 90, 0.45);
+}
+.notes-conflict .nc-msg { flex: 1; min-width: 220px; }
+.notes-conflict .nc-actions { display: inline-flex; gap: 8px; }
 
 .notes-editor {
   flex: 1;
