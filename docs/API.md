@@ -294,6 +294,20 @@ Every state object has a `history` array of
     "members": ["00:1b:92:00:00:01", "00:1b:92:00:00:02"], "history": [...]
   }],
   "domains": [{"class_id": 6, "priority": 3, "vid": 2, "declarer": "00:1b:92:00:00:01"}],
+  "mrp": [{                          // MRP Registrar layer (802.1Q 10.7.8),
+                                     // shared by MSRP + MVRP
+    "proto": "MVRP", "kind": "VID", "attribute": "VLAN 2",
+    "source": "00:1b:92:00:00:01",
+    "registrar": "IN",               // IN | LV | MT (registrar state machine)
+    "last_event": "JoinIn",          // last observed MRP AttributeEvent
+    "events": 3,
+    "log": [                         // observed event stream (step-through UI)
+      {"ts": 0.0, "n": 5, "event": "JoinIn", "state": "IN"},
+      {"ts": 2.1, "n": 40, "event": "Lv", "state": "LV"}
+    ],
+    "history": [{"ts": 0.0, "n": 5, "from": "MT", "to": "IN",
+                 "why": "rJoin (JoinIn) — registered"}]
+  }],
   "maap": [{
     "claimant": "00:1b:92:00:00:01", "range_start": "91:e0:f0:00:0e:80",
     "count": 8, "state": "ACQUIRED", "conflicts": 0, "history": [...]
@@ -426,6 +440,7 @@ State value enums:
 - gptp domain: `NO_GM | GM_PRESENT | GM_TIMED_OUT`, sync `UNKNOWN | HEALTHY | LOST`
 - gptp port: role `UNKNOWN | MASTER | SLAVE` (inferred), as_capable `UNKNOWN | AS_CAPABLE | NOT_AS_CAPABLE`
 - milan sink: `UNBOUND | PRB_W_AVAIL | PRB_W_DELAY | PRB_W_RESP | PRB_W_RESP2 | PRB_W_RETRY | SETTLED_NO_RSV | SETTLED_RSV_OK`
+- mrp registrar: `IN | LV | MT` (802.1Q Registrar state machine, LeaveTime 1.0 s)
 
 Note on ACMP naming: event `type` labels use the IEEE 1722.1 message names;
 Milan renames the same wire values (CONNECT_RX→BIND_RX, DISCONNECT_RX→

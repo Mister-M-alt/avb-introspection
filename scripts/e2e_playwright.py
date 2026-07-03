@@ -186,6 +186,20 @@ def run_tests(page, url):
     expect(page.locator("#machine-sink")).to_be_visible()
     expect(page.locator("#machine-entity")).to_be_visible()
 
+    # MRP registrar machine + interactive event step-through.
+    expect(page.locator("#machine-mrp-registrar")).to_be_visible()
+    expect(page.locator("#machine-mrp-applicant")).to_be_visible()
+    log_rows = page.locator("#mrp-log .mrp-log-row")
+    if log_rows.count() >= 2:
+        # Clicking a log row updates the trigger caption to name the event.
+        log_rows.first.click()
+        page.wait_for_timeout(150)
+        trig = page.locator("#mrp-trigger").inner_text()
+        assert "triggered by" in trig.lower(), \
+            f"MRP step-through trigger caption not updated: {trig!r}"
+        expect(page.locator("#machine-mrp-registrar .sm-node.is-active")
+               ).to_have_count(1)
+
     # ---- investigation notes (FE-9/BE-9) -----------------------------------
     page.locator("#tab-notes").click()
     notes = page.locator("#notes-editor")

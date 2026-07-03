@@ -15,6 +15,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -76,6 +77,53 @@ public:
      *  0 none, 1 Advertise, 2 Failed — drives the Milan sink
      *  EVT_TK_REGISTERED/EVT_TK_UNREGISTERED events. */
     std::map<uint64_t, int> msrpTalkerDecl;
+
+    /** MRP Registrar state machine (IEEE 802.1Q 10.7.8) — the registration
+     *  layer beneath MSRP and MVRP. One instance per (protocol, attribute
+     *  value, declaring source), reconstructed from the observed MRP events
+     *  (New/JoinIn/In/JoinMt/Mt/Lv/LeaveAll). Both MsrpLogic and MvrpLogic
+     *  feed it via mrpEvent(); the registrar's leavetimer is advanced by
+     *  mrpTick(). This is fully observable from a passive tap. */
+    struct MrpAttr {
+        Proto proto = Proto::MSRP;
+        std::string kind;      // VID | TALKER_ADVERTISE | LISTENER | DOMAIN…
+        std::string key;       // human attribute label
+        uint64_t source = 0;   // declaring MAC
+        std::string registrar; // "" -> MT (initial) / IN / LV / MT
+        std::string lastEvent; // last observed MRP AttributeEvent
+        double lastEventTs = -1, leaveTimerStart = -1;
+        uint32_t eventCount = 0;
+        struct LogEntry {      // observed event log for the step-through UI
+            double ts;
+            uint32_t n;
+            std::string event;
+            std::string registrarAfter;
+        };
+        std::vector<LogEntry> log;
+        std::vector<HistEntry> hist; // registrar state transitions only
+    };
+    std::map<std::tuple<int, std::string, uint64_t>, MrpAttr> mrpAttrs;
+
+    /** Record one observed MRP AttributeEvent for an attribute declaration
+     *  and advance the Registrar state machine. `ev` is the decode event id
+     *  (0 New, 1 JoinIn, 2 In, 3 JoinMt, 4 Mt, 5 Lv, 6 LeaveAll). */
+    void mrpEvent(Proto proto, const std::string& kind, const std::string& key,
+                  uint64_t source, int ev, double ts, uint32_t n);
+    /** A LeaveAll is scoped to the attribute TYPE of the MRP Message it is
+     *  carried in (802.1Q): apply rLA only to registrars of that (protocol,
+     *  kind), asking them to re-declare. */
+    void mrpLeaveAll(Proto proto, const std::string& kind, double ts,
+                     uint32_t n);
+    /** Advance registrar leavetimers (LV -> MT). Idempotent; O(1) when no
+     *  registrar is currently leaving. */
+    void mrpTick(double ts);
+    void snapshotMrp(JsonWriter& w) const;
+
+    /** Move a registrar to `to`, record the transition, and keep mrpLvCount
+     *  (the number of registrars currently in LV) in step. */
+    void mrpSetRegistrar(MrpAttr& a, const std::string& to, double ts,
+                         uint32_t n, const std::string& why);
+    size_t mrpLvCount = 0;
 
     std::string nameOf(uint64_t entityId) const {
         auto it = entityNames.find(entityId);

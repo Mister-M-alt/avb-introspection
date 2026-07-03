@@ -224,6 +224,14 @@ def phase_main():
     check(state["reservations"][0]["state"] == "WITHDRAWN", "reservation withdrawn")
     check(state["maap"][0]["state"] == "ACQUIRED", "MAAP range acquired")
     check(len(state["vlans"]) == 1 and state["vlans"][0]["vid"] == 2, "VLAN 2")
+    # MRP Registrar layer (802.1Q) beneath MSRP/MVRP.
+    mrp = {a["attribute"]: a for a in state.get("mrp", [])}
+    check(len(mrp) >= 3 and any(a["proto"] == "MVRP" for a in mrp.values())
+          and any(a["proto"] == "MSRP" for a in mrp.values()),
+          "MRP registrar attributes from both MSRP and MVRP")
+    check(all(a["registrar"] in ("IN", "LV", "MT") for a in mrp.values())
+          and all(len(a["log"]) >= 1 for a in mrp.values()),
+          "MRP registrar state + event log present")
     check(all("history" in e for e in state["entities"]), "state history present")
 
     # Investigation notes: seeded template, full-replace edit, validation.

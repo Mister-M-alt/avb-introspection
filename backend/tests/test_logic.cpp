@@ -765,6 +765,56 @@ TEST(msrp_gptp_annotation) {
     CHECK(r.shared.establishedStreams.empty());
 }
 
+TEST(mrp_registrar_state_machine) {
+    // The MRP Registrar (802.1Q 10.7.8) is driven by the observed events and
+    // shared across MSRP/MVRP. Drive it directly through SharedModel.
+    SharedModel sm;
+    auto reg = [&](const char* proto) {
+        JsonWriter w;
+        sm.snapshotMrp(w);
+        std::string s = w.str();
+        (void)proto;
+        return s;
+    };
+
+    // JoinIn -> IN (register).
+    sm.mrpEvent(Proto::MVRP, "VID", "VLAN 2", 0x1, 1 /*JoinIn*/, 0.0, 1);
+    CHECK(reg("").find("\"registrar\":\"IN\"") != std::string::npos);
+    CHECK(reg("").find("\"attribute\":\"VLAN 2\"") != std::string::npos);
+
+    // In / Mt do not change the registrar.
+    sm.mrpEvent(Proto::MVRP, "VID", "VLAN 2", 0x1, 2 /*In*/, 0.5, 2);
+    CHECK(reg("").find("\"registrar\":\"IN\"") != std::string::npos);
+
+    // Lv -> LV (leavetimer started); leavetimer expiry -> MT.
+    sm.mrpEvent(Proto::MVRP, "VID", "VLAN 2", 0x1, 5 /*Lv*/, 1.0, 3);
+    CHECK(reg("").find("\"registrar\":\"LV\"") != std::string::npos);
+    sm.mrpTick(1.5); // < LeaveTime (1.0 s): not yet
+    CHECK(reg("").find("\"registrar\":\"LV\"") != std::string::npos);
+    sm.mrpTick(2.1); // > 1.0 s after the Lv
+    CHECK(reg("").find("\"registrar\":\"MT\"") != std::string::npos);
+
+    // The event log records each observed event + resulting registrar.
+    CHECK(reg("").find("\"event\":\"JoinIn\"") != std::string::npos);
+    CHECK(reg("").find("\"event\":\"Lv\"") != std::string::npos);
+
+    // LeaveAll is scoped to one attribute type: a DOMAIN LeaveAll moves the
+    // DOMAIN registrar to LV but leaves the TALKER registrar untouched.
+    sm.mrpEvent(Proto::MSRP, "DOMAIN", "Domain class 6", 0x9, 1, 0.0, 1);
+    sm.mrpEvent(Proto::MSRP, "TALKER_ADVERTISE", "Talker Advertise 0xbeef", 0x9,
+                1, 0.1, 2);
+    sm.mrpLeaveAll(Proto::MSRP, "DOMAIN", 0.2, 3);
+    std::string s = reg("");
+    size_t lv = 0, pos = 0;
+    while ((pos = s.find("\"registrar\":\"LV\"", pos)) != std::string::npos) {
+        ++lv;
+        pos += 4;
+    }
+    CHECK_EQ(lv, (size_t)1); // only the DOMAIN registrar left; the TALKER stays IN
+    CHECK(s.find("\"kind\":\"TALKER_ADVERTISE\"") != std::string::npos &&
+          s.find("\"registrar\":\"IN\"") != std::string::npos);
+}
+
 TEST(maap_probe_announce_defend_lost) {
     Rig r("1722_maap");
     auto feed = [&](uint64_t msg, uint64_t start, uint64_t count, double ts) {

@@ -55,6 +55,7 @@ struct AnalysisState {
         for (auto& [svc, mod] : modules)
             if (auto* base = dynamic_cast<AvbLogicBase*>(mod.get()))
                 base->snapshot(w);
+        shared.snapshotMrp(w); // MRP registrar layer (fed by MSRP + MVRP)
         w.endObj();
     }
 };

@@ -30,10 +30,14 @@ public:
                     transition(vl, vid, ts, n, "LEAVING",
                                "LeaveAll from " + macStr(member));
             }
+            if (mShared) mShared->mrpLeaveAll(Proto::MVRP, "VID", ts, n);
             return;
         }
 
         uint16_t vid = (uint16_t)v->at("vid");
+        if (mShared)
+            mShared->mrpEvent(Proto::MVRP, "VID", "VLAN " + std::to_string(vid),
+                              member, ev, ts, n);
         auto& vl = mVlans[vid];
 
         switch (ev) {
@@ -57,6 +61,12 @@ public:
         default:
             break;
         }
+    }
+
+    void onTimeTick(double ts) override {
+        // Drives the shared MRP registrar leavetimer (covers MSRP attrs too,
+        // since mrpTick walks the whole map). MvrpLogic always exists.
+        if (mShared) mShared->mrpTick(ts);
     }
 
     void snapshot(JsonWriter& w) const override {

@@ -1364,6 +1364,94 @@ input.marker-label { width: 100%; }
 .sm-elabel.is-dim { fill: var(--muted); }
 .sm-elabel.is-recent { fill: var(--sm-accent); }
 
+/* ── MRP section (802.1Q registration layer + event step-through) ── */
+.machine-section-head {
+  margin: 20px 0 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.machine-section-head .msh-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-right: 8px;
+}
+
+/* the "triggered by …" caption above the Registrar diagram */
+.mrp-trigger {
+  min-height: 15px;
+  margin-bottom: 6px;
+  font: 600 11px var(--mono);
+  color: var(--muted);
+  letter-spacing: 0.2px;
+}
+.mrp-trigger.flash { animation: mrp-flash 0.6s ease-out; }
+@keyframes mrp-flash {
+  0% { color: var(--accent); text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent); }
+  100% { color: var(--muted); text-shadow: none; }
+}
+
+/* step-through header + auto-play */
+.mrp-step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.mrp-step-cur {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 600 11px var(--mono);
+  color: var(--text-2);
+}
+.mrp-step-hint { margin-bottom: 8px; }
+
+/* clickable observed-event log */
+.mrp-log {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.mrp-log:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mrp-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.mrp-log-row:last-child { border-bottom: none; }
+.mrp-log-row:hover { background: var(--hover); }
+.mrp-log-row.sel {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.mrp-log-row .mlr-i { color: var(--dim); min-width: 34px; }
+.mrp-log-row .mlr-ts { color: var(--text-2); min-width: 84px; font-variant-numeric: tabular-nums; }
+.mrp-log-row .mlr-ev { color: var(--text); font-weight: 600; min-width: 62px; }
+.mrp-log-row .mlr-arrow { color: var(--dim); }
+
+/* applicant reference: the driving-events legend under its grid */
+.mrp-appl-events {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-strong);
+}
+.mrp-appl-events .mae-head {
+  font: 600 11px var(--sans);
+  color: var(--muted);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.mae-row { display: flex; gap: 10px; align-items: baseline; padding: 2px 0; font-size: 11.5px; }
+.mae-row .mae-ev { color: var(--accent); font-weight: 600; min-width: 150px; }
+.mae-row .mae-eff { color: var(--text-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mrp-trigger.flash { animation: none; }
+}
+
 /* narrow screens: stack the split */
 @media (max-width: 900px) {
   .session-main { flex-direction: column; }

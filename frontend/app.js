@@ -1147,6 +1147,123 @@ const ADP_DISCOVERY_MACHINE = {
   ],
 };
 
+/* ── MRP machines (IEEE 802.1Q) — the registration layer beneath MSRP/MVRP ──
+   The Registrar (Table 10-4) is fully tap-observable, so it carries a live
+   overlay; the Applicant (Table 10-3) is sender-internal, drawn as a reference
+   grid with a legend of driving events (its 12×15 matrix is not observable). */
+
+/* wire AttributeEvent -> spec registrar event (for the step-through captions) */
+const MRP_EV_MAP = {
+  New: 'rNew', JoinIn: 'rJoinIn', JoinMt: 'rJoinMt',
+  Lv: 'rLv', LeaveAll: 'rLA', In: 'rIn', Mt: 'rMt',
+};
+
+const MRP_REGISTRAR_MACHINE = {
+  title: 'MRP Registrar',
+  subtitle: 'IEEE 802.1Q §10.7.8, Table 10-4 — registration state machine (LeaveTime ≈ 1.0 s)',
+  svgId: 'machine-mrp-registrar', accent: PROTO_COLORS.MSRP,
+  view: { x: 0, y: -30, w: 600, h: 355 }, minW: 470,
+  states: [
+    { id: 'MT', x: 50, y: 60, sub: 'empty · start' },
+    { id: 'IN', x: 360, y: 60, sub: 'registered' },
+    { id: 'LV', x: 360, y: 210, sub: 'leaving · timer' },
+  ],
+  edges: [
+    { from: 'MT', to: 'IN', fromSide: 'R', fromT: 0.5, toSide: 'L', toT: 0.5,
+      label: ['rNew · rJoinIn', '· rJoinMt'], labelAt: { x: 281, y: 64 } },
+    { from: 'IN', to: 'IN', label: ['rNew', '(New!)'], labelAt: { x: 436, y: 0 } },
+    { from: 'IN', to: 'LV', fromSide: 'B', fromT: 0.66, toSide: 'T', toT: 0.66,
+      label: ['rLv · rLA · txLA', '· Re-declare'], labelAt: { x: 512, y: 150 } },
+    { from: 'LV', to: 'IN', fromSide: 'T', fromT: 0.34, toSide: 'B', toT: 0.34,
+      label: ['rNew · rJoinIn', '· rJoinMt'], labelAt: { x: 330, y: 165 } },
+    { from: 'LV', to: 'MT', fromSide: 'B', fromT: 0.5, toSide: 'B', toT: 0.5,
+      via: [{ x: 436, y: 292 }, { x: 126, y: 292 }],
+      label: ['leavetimer!', '/ Flush!'], labelAt: { x: 281, y: 280 } },
+  ],
+  note: 'Fully tap-observable — the registration layer shared by MSRP and MVRP. '
+    + 'Wire AttributeEvents map New→rNew, JoinIn→rJoinIn, JoinMt→rJoinMt, '
+    + 'Lv→rLv, LeaveAll→rLA. In / Mt are logged but do not move the registrar. '
+    + 'Use the event step-through below to walk it event by event.',
+};
+
+const MRP_APPLICANT_MACHINE = {
+  title: 'MRP Applicant',
+  subtitle: 'IEEE 802.1Q §10.7.7, Table 10-3 — sender-internal declaration machine (reference)',
+  svgId: 'machine-mrp-applicant', accent: PROTO_COLORS.MVRP, reference: true,
+  view: { x: 0, y: 0, w: 786, h: 392 }, minW: 620,
+  states: [
+    { id: 'VO', x: 30, y: 30, sub: 'v.anxious observer' },
+    { id: 'VP', x: 222, y: 30, sub: 'v.anxious passive' },
+    { id: 'VN', x: 414, y: 30, sub: 'v.anxious new' },
+    { id: 'AO', x: 30, y: 126, sub: 'anxious observer' },
+    { id: 'AP', x: 222, y: 126, sub: 'anxious passive' },
+    { id: 'AN', x: 414, y: 126, sub: 'anxious new' },
+    { id: 'AA', x: 606, y: 126, sub: 'anxious active' },
+    { id: 'QO', x: 30, y: 222, sub: 'quiet observer' },
+    { id: 'QP', x: 222, y: 222, sub: 'quiet passive' },
+    { id: 'QA', x: 606, y: 222, sub: 'quiet active' },
+    { id: 'LO', x: 30, y: 318, sub: 'leaving observer' },
+    { id: 'LA', x: 606, y: 318, sub: 'leaving active' },
+  ],
+  edges: [],
+  note: 'Sender-internal — not observable from a passive capture; reconstructed '
+    + 'only as the observed event stream (see the Registrar above and the event '
+    + 'log). Rows = declaration urgency (very anxious → anxious → quiet → leaving); '
+    + 'columns = activity (observer · passive · new · active). The full 12×15 '
+    + 'transition table is intricate and non-observable, so edges are omitted; the '
+    + 'driving events are listed below.',
+};
+
+function mrpAttrLabel(m) {
+  return '[' + (m.proto || '?') + '] ' + (m.attribute || m.kind || '?')
+    + ' — ' + (m.source || '?');
+}
+
+/* IN / LV / MT -> the shared state-chip colors (good / warn / neutral) */
+function mrpStateBadge(s, small) {
+  const cls = s === 'IN' ? 'st-good' : s === 'LV' ? 'st-warn' : 'st-neutral';
+  return h('span', { class: 'sbadge ' + cls + (small ? ' sm' : '') }, String(s || '?'));
+}
+
+/* live overlay for the registrar at log step `idx`: current = the state after
+   that event, visited = every state seen up to it, history = the transitions
+   walked so far (last one is emphasized as the recent edge) */
+function mrpLiveAt(entry, idx) {
+  const log = (entry && entry.log) || [];
+  const visited = new Set(['MT']);   /* the registrar always starts empty (MT) */
+  const history = [];
+  let prev = 'MT';
+  const end = Math.min(idx, log.length - 1);
+  for (let j = 0; j <= end; j++) {
+    const stt = log[j].state;
+    if (!stt) continue;
+    visited.add(stt);
+    if (prev !== stt) history.push({ from: prev, to: stt });
+    else if (stt === 'IN' && MRP_EV_MAP[log[j].event] === 'rNew') history.push({ from: 'IN', to: 'IN' });
+    prev = stt;
+  }
+  const current = (end >= 0 && log[end]) ? log[end].state
+    : ((entry && entry.registrar) || null);
+  if (current) visited.add(current);
+  return { current, history, visited };
+}
+
+/* the applicant reference's driving-event legend (rendered under its grid) */
+function mrpApplicantEvents() {
+  const item = (ev, eff) => h('div', { class: 'mae-row' },
+    h('span', { class: 'mae-ev mono' }, ev),
+    h('span', { class: 'mae-eff' }, eff));
+  return h('div', { class: 'mrp-appl-events' },
+    h('div', { class: 'mae-head' }, 'Driving events (Table 10-3)'),
+    item('Begin!', 'reset → VO'),
+    item('New!', 'declare a new value → VN'),
+    item('Join!', 'declare · move toward Active (→ VP / AA)'),
+    item('Lv!', 'withdraw · move to Leaving (LA / LO)'),
+    item('tx! / txLA!', 'transmit; anxiety decreases (VN→AN→QA, VP→AA→QA)'),
+    item('rJoinIn! / rJoinMt!', 'someone else declared; may go Quiet'),
+    item('rLv! / rLA!', 'someone is leaving'));
+}
+
 /* ────────────────────────── admin view ────────────────────────── */
 
 function adminView(app) {
@@ -1800,6 +1917,8 @@ function sessionView(app, id) {
   let inspNeedsEvent = -1;   /* selected-but-not-yet-loaded event index */
   let machineSinkIdx = 0;    /* Machines tab: selected milan_sinks[] instance */
   let machineEntityIdx = 0;  /* Machines tab: selected entities[] instance */
+  let machineMrpIdx = -1;    /* Machines tab: selected mrp[] instance (-1 → last) */
+  let mrpPlayTimer = 0;      /* Machines tab: MRP step-through auto-play interval */
 
   function selectEvent(i, opts) {
     opts = opts || {};
@@ -1875,6 +1994,8 @@ function sessionView(app, id) {
   function setTab(t) {
     /* auto-save on leave — but never while a conflict awaits a decision */
     if (S.tab === 'notes' && t !== 'notes' && N.dirty && !N.conflict) saveNotes();
+    /* stop the MRP step-through auto-play when leaving the Machines tab */
+    if (S.tab === 'machines' && t !== 'machines') { clearInterval(mrpPlayTimer); mrpPlayTimer = 0; }
     S.tab = t;
     tabInspBtn.classList.toggle('active', t === 'inspect');
     tabStateBtn.classList.toggle('active', t === 'state');
@@ -2440,11 +2561,16 @@ function sessionView(app, id) {
       if (!S.stateLoading) loadState();
       return;
     }
+    clearInterval(mrpPlayTimer); mrpPlayTimer = 0;   /* stop any running step-through */
     const st = S.stateData;
     const sinks = st.milan_sinks || [];
     const entities = st.entities || [];
+    const mrp = st.mrp || [];
     if (machineSinkIdx >= sinks.length) machineSinkIdx = 0;
     if (machineEntityIdx >= entities.length) machineEntityIdx = 0;
+    if (mrp.length) {
+      if (machineMrpIdx < 0 || machineMrpIdx >= mrp.length) machineMrpIdx = mrp.length - 1;
+    } else machineMrpIdx = 0;
 
     const refreshBtn = h('button', { class: 'btn btn-sm', type: 'button' }, 'Refresh');
     refreshBtn.addEventListener('click', () => { S.stateData = null; renderMachinesTab(); });
@@ -2477,6 +2603,147 @@ function sessionView(app, id) {
     const sink = sinks[machineSinkIdx] || null;
     const entity = entities[machineEntityIdx] || null;
 
+    /* ── MRP registration layer (802.1Q): attribute selector, live Registrar,
+       Applicant reference, and the observed-event step-through ── */
+    const mrpEntry = mrp[machineMrpIdx] || null;
+    const mrpAccent = mrpEntry ? (PROTO_COLORS[mrpEntry.proto] || PROTO_COLORS.MSRP) : PROTO_COLORS.MSRP;
+    const log = mrpEntry ? (mrpEntry.log || []) : [];
+    let stepIdx = log.length ? log.length - 1 : -1;   /* default = last (live) row */
+
+    const mrpAttrSel = h('select', {
+      id: 'machine-mrp-attr', class: 'input input-sm', disabled: !mrp.length,
+      title: 'MRP attribute (protocol · attribute · source) — drives the Registrar overlay and the event step-through',
+    }, mrp.length
+      ? mrp.map((m, i) => h('option', { value: String(i) }, mrpAttrLabel(m)))
+      : [h('option', { value: '0' }, 'no MRP attributes observed')]);
+    mrpAttrSel.value = String(machineMrpIdx);
+    mrpAttrSel.addEventListener('change', () => {
+      machineMrpIdx = parseInt(mrpAttrSel.value, 10) || 0;
+      renderMachinesTab();
+    });
+
+    const regDef = Object.assign({}, MRP_REGISTRAR_MACHINE, { accent: mrpAccent });
+    const mrpRegScroll = h('div', { class: 'sm-scroll' });
+    const mrpTrigger = h('div', { id: 'mrp-trigger', class: 'mrp-trigger' },
+      log.length ? '' : 'passive tap — the registrar walks as each observed event arrives');
+    const mrpStepCur = h('span', { class: 'mrp-step-cur' });
+    const mrpPlayBtn = h('button', {
+      id: 'mrp-play', class: 'btn btn-sm', type: 'button',
+      disabled: log.length < 2, 'aria-pressed': 'false',
+      title: 'auto-step through the observed events (~2/s)',
+    }, '▸ Play');
+    const mrpLog = h('div', {
+      id: 'mrp-log', class: 'mrp-log', role: 'listbox',
+      tabindex: log.length ? '0' : '-1', 'aria-label': 'MRP observed event stream',
+    });
+
+    function drawReg(idx) {
+      mrpRegScroll.replaceChildren();
+      const live = mrpEntry ? mrpLiveAt(mrpEntry, idx)
+        : { current: null, history: [], visited: new Set() };
+      drawMachine(mrpRegScroll, regDef, live);
+    }
+
+    function setStep(idx, opts) {
+      opts = opts || {};
+      if (!log.length) { drawReg(-1); return; }
+      idx = Math.max(0, Math.min(log.length - 1, idx));
+      stepIdx = idx;
+      drawReg(idx);
+      const e = log[idx];
+      const mapped = MRP_EV_MAP[e.event];
+      mrpTrigger.textContent = 'triggered by ' + e.event
+        + (mapped ? ' (' + mapped + ')' : '') + '  →  registrar ' + e.state;
+      mrpTrigger.classList.remove('flash');
+      void mrpTrigger.offsetWidth;          /* reflow to restart the flash keyframes */
+      if (!opts.noFlash) mrpTrigger.classList.add('flash');
+      mrpStepCur.replaceChildren('step #' + idx + ' / ' + (log.length - 1) + '  ',
+        mrpStateBadge(e.state, true));
+      mrpLog.querySelectorAll('.mrp-log-row').forEach((r) => {
+        const on = Number(r.dataset.idx) === idx;
+        r.classList.toggle('sel', on);
+        r.tabIndex = on ? 0 : -1;
+        if (on && opts.scroll) r.scrollIntoView({ block: 'nearest' });
+        if (on && opts.focus) r.focus();
+      });
+    }
+
+    function stopPlay() {
+      if (mrpPlayTimer) { clearInterval(mrpPlayTimer); mrpPlayTimer = 0; }
+      mrpPlayBtn.textContent = '▸ Play';
+      mrpPlayBtn.setAttribute('aria-pressed', 'false');
+    }
+    function togglePlay() {
+      if (mrpPlayTimer) { stopPlay(); return; }
+      if (log.length < 2) return;
+      if (stepIdx >= log.length - 1) setStep(0);   /* restart from the top at the end */
+      mrpPlayBtn.textContent = '❚❚ Pause';
+      mrpPlayBtn.setAttribute('aria-pressed', 'true');
+      mrpPlayTimer = setInterval(() => {
+        if (stepIdx >= log.length - 1) { stopPlay(); return; }
+        setStep(stepIdx + 1, { scroll: true });
+      }, 500);
+    }
+    mrpPlayBtn.addEventListener('click', togglePlay);
+
+    mrpLog.addEventListener('keydown', (ev) => {
+      if (!log.length) return;
+      const k = ev.key;
+      if (k === 'ArrowDown' || k === 'ArrowRight') { ev.preventDefault(); stopPlay(); setStep(stepIdx + 1, { scroll: true, focus: true }); }
+      else if (k === 'ArrowUp' || k === 'ArrowLeft') { ev.preventDefault(); stopPlay(); setStep(stepIdx - 1, { scroll: true, focus: true }); }
+      else if (k === 'Home') { ev.preventDefault(); stopPlay(); setStep(0, { scroll: true, focus: true }); }
+      else if (k === 'End') { ev.preventDefault(); stopPlay(); setStep(log.length - 1, { scroll: true, focus: true }); }
+    });
+
+    if (!log.length) {
+      mrpLog.appendChild(h('div', { class: 'empty small' }, 'No MRP attributes observed yet.'));
+    } else {
+      log.forEach((e, i) => {
+        const row = h('div', {
+          class: 'mrp-log-row', role: 'option', tabindex: '-1', dataset: { idx: String(i) },
+        },
+          h('span', { class: 'mlr-i mono' }, '#' + i),
+          h('span', { class: 'mlr-ts mono' }, fmtTime(e.ts)),
+          h('span', { class: 'mlr-ev' }, e.event),
+          h('span', { class: 'mlr-arrow' }, '→'),
+          mrpStateBadge(e.state, true));
+        row.addEventListener('click', () => { stopPlay(); setStep(i, { focus: true }); });
+        mrpLog.appendChild(row);
+      });
+    }
+
+    const applCard = machineCard(MRP_APPLICANT_MACHINE, {}, null);
+    applCard.appendChild(mrpApplicantEvents());
+
+    const mrpSection = h('div', { class: 'mrp-section' },
+      h('div', { class: 'machine-section-head' },
+        h('span', { class: 'msh-title' }, 'MRP registration layer'),
+        h('span', { class: 'dim small' },
+          'IEEE 802.1Q — the registration state machines beneath MSRP & MVRP')),
+      h('div', { class: 'machine-controls' },
+        h('label', { for: 'machine-mrp-attr' }, 'MRP attribute'), mrpAttrSel),
+      h('div', { class: 'machine-card' },
+        h('div', { class: 'machine-head' },
+          h('span', { class: 'machine-title' }, regDef.title),
+          h('span', { class: 'machine-sub dim small' }, regDef.subtitle)),
+        mrpTrigger,
+        mrpRegScroll,
+        mrpEntry ? null : h('div', { class: 'machine-note mn-live' },
+          'No MRP attributes observed yet — showing the reference registrar.'),
+        h('div', { class: 'machine-note' }, regDef.note)),
+      applCard,
+      h('div', { class: 'machine-card mrp-step' },
+        h('div', { class: 'mrp-step-head' },
+          h('span', { class: 'machine-title' }, 'Event step-through'),
+          mrpStepCur,
+          h('span', { class: 'toolbar-spacer' }),
+          mrpPlayBtn),
+        h('div', { class: 'mrp-step-hint dim small' },
+          'Click an event (or focus the list and use ↑ / ↓) to walk the Registrar to that '
+          + 'state — the triggering event is named at each step.'),
+        mrpLog),
+    );
+
     inspBody.replaceChildren(h('div', { class: 'insp-scroll' },
       h('div', { class: 'state-actions' },
         h('span', { class: 'dim small' }, 'Milan v1.2 protocol state machines — live overlay'),
@@ -2493,7 +2760,17 @@ function sessionView(app, id) {
       machineCard(ADP_ADVERTISE_MACHINE, advertiseLive(entity), null),
       machineCard(ADP_DISCOVERY_MACHINE, discoveryLive(sink),
         sink ? null : 'No bound sink selected — talker discovery is tracked per sink.'),
+      mrpSection,
     ));
+
+    /* initial overlay: default to the last (current live) event, no flash */
+    if (log.length) {
+      setStep(stepIdx, { noFlash: true });
+      const selRow = mrpLog.querySelector('.mrp-log-row.sel');
+      if (selRow) selRow.scrollIntoView({ block: 'nearest' });
+    } else {
+      drawReg(-1);
+    }
   }
 
   /* ────────── inspector: notes tab ────────── */
@@ -3703,6 +3980,7 @@ function sessionView(app, id) {
       stopPolling();
       clearTimeout(searchTimer);
       clearInterval(pingTimer);
+      clearInterval(mrpPlayTimer);
       if (ws) { try { ws.close(); } catch (err) { /* ignore */ } ws = null; }
       document.removeEventListener('keydown', onKey);
       resizeObs.disconnect();

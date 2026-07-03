@@ -25,7 +25,50 @@ public:
         int ev = (int)v->at("mrp_event");
         uint64_t src = v->at("src_mac");
 
-        if (ev == 6) return; // LeaveAll: re-declaration expected, no state change
+        // Attribute-type descriptors for the MRP registrar layer. Each MSRP
+        // attribute type is a distinct 802.1Q Registrar, so the key must
+        // separate them (TalkerAdvertise vs TalkerFailed) and fully identify
+        // the attribute value (Domain by class+priority+vid).
+        auto mrpKind = [&]() -> std::string {
+            switch (attr) {
+            case 1: return "TALKER_ADVERTISE";
+            case 2: return "TALKER_FAILED";
+            case 3: return "LISTENER";
+            case 4: return "DOMAIN";
+            }
+            return "";
+        };
+        auto mrpKey = [&]() -> std::string {
+            switch (attr) {
+            case 1: return "Talker Advertise " + idStr(v->at("stream_id"));
+            case 2: return "Talker Failed " + idStr(v->at("stream_id"));
+            case 3: return "Listener " + idStr(v->at("stream_id"));
+            case 4:
+                return "Domain class " + std::to_string(v->at("sr_class_id")) +
+                       " prio " + std::to_string(v->at("sr_class_priority")) +
+                       " vid " + std::to_string(v->at("sr_class_vid"));
+            }
+            return "";
+        };
+
+        if (ev == 6) { // LeaveAll — scoped to this attribute type (802.1Q)
+            std::string kind = mrpKind();
+            if (mShared && !kind.empty())
+                mShared->mrpLeaveAll(Proto::MSRP, kind, ts, n);
+            return;
+        }
+
+        // Feed the MRP registrar layer (802.1Q 10.7.8) with this declaration.
+        if (mShared) {
+            std::string key = mrpKey();
+            // A Listener declaring "Ignore" (four-packed 0) expresses no
+            // interest — treat it as a leave so the registrar view agrees
+            // with the reservation view.
+            int regEv = ev;
+            if (attr == 3 && (int)v->at("four_packed_event") == 0) regEv = 5;
+            if (!key.empty())
+                mShared->mrpEvent(Proto::MSRP, mrpKind(), key, src, regEv, ts, n);
+        }
 
         switch (attr) {
         case 1:   // TalkerAdvertise
