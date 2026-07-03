@@ -800,6 +800,8 @@ void decodeInner(std::span<const uint8_t> frame, DecodedPacket* out,
     if (out) {
         out->src = macStr(eth.src);
         out->dst = macStr(eth.dst);
+        out->srcMac = eth.src;
+        out->dstMac = eth.dst;
     }
 
     auto protoOf = [](uint8_t subtype) {

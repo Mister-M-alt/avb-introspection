@@ -67,6 +67,9 @@ Response:
   "error": "",                       // set when status == "error"
   "packets": 1234, "events": 2345, "decode_errors": 2,
   "duration": 12.5,                  // capture length, seconds
+  "start_ts_ns": "1719912345123456789", // first packet, epoch ns, AS A STRING
+                                        // (JS needs BigInt for ns precision;
+                                        // used for time-of-day display)
   "created_at": "2026-07-02T16:00:00Z"
 }]}
 ```
@@ -141,6 +144,48 @@ Response: `{"markdown": "# Investigation: trace.pcap\n\n..."}`
 
 Request: `{"markdown": "<full replacement content>"}` (≤ 1 MiB).
 Response: `{"ok": true}`. 400 when `markdown` is missing or not a string.
+
+## Session info & devices
+
+### GET /api/sessions/{id}/info
+
+File metadata of the session's capture copy, the capture time window, and
+the device inventory (every observed frame source):
+
+```json
+{
+  "file": {"path": "...", "size": 679272, "modified": "2026-07-02T18:53:01Z",
+           "accessed": "2026-07-02T19:00:00Z",
+           "created": "2026-07-02T18:53:01Z"},   // "" if the fs has no btime
+  "capture": {"start_ts_ns": "1719912345123456789",
+              "end_ts_ns": "1719912589180791789",
+              "start_iso": "2026-06-26T17:41:58Z",
+              "end_iso": "2026-06-26T17:46:02Z",
+              "duration": 244.06, "packets": 5393},
+  "session": {"id": "s1", "name": "trace.pcap",
+              "created_at": "2026-07-02T18:56:43Z"},
+  "devices": [{
+    "mac": "00:1b:92:00:00:01",
+    "packets": 1234,
+    "protocols": ["GPTP", "MSRP", "ADP"],
+    "entity_id": "0x001b92fffe000001",  // "" when no ATDECC association
+    "entity_name": "Stage Box FOH",     // auto, learned via AEM (PA-6)
+    "name": "FOH Rack"                  // user-assigned, "" if unset
+  }]
+}
+```
+
+### PUT /api/devices
+
+Assign a display name to a device. Names are **global** (a device keeps its
+name across sessions) and persist in `data/devices.json`.
+Request: `{"mac": "aa:bb:cc:dd:ee:ff", "name": "FOH Rack"}` (name ≤ 64
+chars; empty string removes the entry; MAC is case-normalized).
+Response: `{"ok": true}`. 400 on malformed MAC/name.
+
+The frontend should display `name` (user) → `entity_name` (auto) → `mac` as
+the device label wherever a MAC appears (events table src/dst, inspector
+fields, state view).
 
 ## Packet inspector
 
@@ -221,6 +266,26 @@ Every state object has a `history` array of
     "commands": 5, "responses": 5, "timeouts": 0, "unsolicited": 1,
     "last": [{"sequence_id": 4, "command": "GET_NAME", "status": "SUCCESS", "rtt_ms": 1.2}]
   }],
+  "milan_sinks": [{
+    "listener_entity": "0x001b92fffe000002", "listener_unique_id": 0,
+    "state": "SETTLED_RSV_OK",   // Milan v1.2 §5.5.3: UNBOUND | PRB_W_AVAIL |
+                                 // PRB_W_DELAY | PRB_W_RESP | PRB_W_RESP2 |
+                                 // PRB_W_RETRY | SETTLED_NO_RSV | SETTLED_RSV_OK
+    "probing_status": "PROBING_COMPLETED", // Milan Table 5.5 mapping
+    "bound_talker": "0x001b92fffe000001", "bound_talker_unique_id": 0,
+    "controller": "0x0000000000000099",
+    "stream_id": "0x…", "dest_mac": "…", "vlan": 2,
+    "probes_sent": 3, "history": [...]
+  }],
+  "milan_talkers": [{               // Milan talkers are stateless (§5.5.2.7):
+    "talker_entity": "0x001b92fffe000001", "talker_unique_id": 0,
+    "probes_received": 2, "probe_responses": 2, "last_status": "SUCCESS",
+    "stream_id": "0x…",
+    "srp_declaration": "ADVERTISE", // live from MSRP: ADVERTISE|FAILED|NONE
+    "disconnect_tx_seen": 0,
+    "get_tx_connection_seen": 0,    // >0 raises a warning (not implemented
+    "history": [...]                //  by Milan talkers, §5.5.4.4)
+  }],
   "gptp": {
     "domains": [{
       "domain": 0,
@@ -260,6 +325,18 @@ Every state object has a `history` array of
         "last_turnaround_us": 812.4,      // responder wire timestamps (exact)
         "last_observed_gap_ms": 1.9       // capture-clock gap (approximate)
       },
+      "md": {   // 802.1AS-2020 Clause 11 media-dependent machines
+                // (full-duplex point-to-point: 802.3 copper & fiber)
+        "clause": "11 (full-duplex point-to-point, 802.3 copper/fiber)",
+        "pdelay_req_state": "WAITING_FOR_PDELAY_INTERVAL_TIMER",
+                // NOT_ENABLED | WAITING_FOR_PDELAY_RESP |
+                // WAITING_FOR_PDELAY_RESP_FOLLOW_UP |
+                // WAITING_FOR_PDELAY_INTERVAL_TIMER | RESET
+        "pdelay_resp_state": "WAITING_FOR_PDELAY_REQ",
+                // NOT_ENABLED | WAITING_FOR_PDELAY_REQ |
+                // SENT_PDELAY_RESP_WAITING_FOR_TIMESTAMP
+        "resets": 2       // MDPdelayReq RESET entries (lost responses)
+      },
       "history": [...]
     }]
   }
@@ -274,6 +351,13 @@ State value enums:
 - connection: `DISCONNECTED | CONNECTING | CONNECTED | DISCONNECTING | FAILED`
 - gptp domain: `NO_GM | GM_PRESENT | GM_TIMED_OUT`, sync `UNKNOWN | HEALTHY | LOST`
 - gptp port: role `UNKNOWN | MASTER | SLAVE` (inferred), as_capable `UNKNOWN | AS_CAPABLE | NOT_AS_CAPABLE`
+- milan sink: `UNBOUND | PRB_W_AVAIL | PRB_W_DELAY | PRB_W_RESP | PRB_W_RESP2 | PRB_W_RETRY | SETTLED_NO_RSV | SETTLED_RSV_OK`
+
+Note on ACMP naming: event `type` labels use the IEEE 1722.1 message names;
+Milan renames the same wire values (CONNECT_RX→BIND_RX, DISCONNECT_RX→
+UNBIND_RX, CONNECT_TX→PROBE_TX) and the Milan vocabulary is used in the
+`milan_sinks` transition reasons. ACMP command timeouts follow Milan
+Table 5.26 (200 ms).
 
 ## Metrics (NF-2)
 

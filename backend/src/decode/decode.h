@@ -52,6 +52,7 @@ struct DecodedPacket {
     uint32_t num = 0;
     double ts = 0;
     std::string src, dst;
+    uint64_t srcMac = 0, dstMac = 0; // numeric copies for device accounting
     Proto proto = Proto::ETH;
     bool interesting = false;
     bool ok = false;

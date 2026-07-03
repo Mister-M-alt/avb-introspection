@@ -239,6 +239,34 @@ def phase_main():
     st, _ = req("PUT", f"/api/sessions/{sid}/notes", {"nope": 1}, token=token)
     check(st == 400, "bad notes body -> 400")
 
+    # Session info: file metadata, capture window, device inventory.
+    st, info = req("GET", f"/api/sessions/{sid}/info", token=token)
+    check(st == 200 and info["capture"]["packets"] == 36, "info: capture block")
+    check(info["capture"]["start_ts_ns"].isdigit()
+          and int(info["capture"]["end_ts_ns"]) > int(info["capture"]["start_ts_ns"]),
+          "info: ns capture window")
+    check(info["file"]["size"] > 0 and info["file"]["modified"] != "",
+          "info: file stat")
+    devs = {d["mac"]: d for d in info["devices"]}
+    talker = devs.get("00:1b:92:00:00:01")
+    check(talker is not None and talker["entity_name"] == "Stage Box FOH"
+          and "MSRP" in talker["protocols"],
+          "info: device auto-named via its entity")
+
+    st, _ = req("PUT", "/api/devices",
+                {"mac": "00:1B:92:00:00:01", "name": "FOH Rack"}, token=token)
+    check(st == 200, "device rename")
+    st, info = req("GET", f"/api/sessions/{sid}/info", token=token)
+    check({d["mac"]: d for d in info["devices"]}
+          ["00:1b:92:00:00:01"]["name"] == "FOH Rack",
+          "device name round-trip (case-normalized)")
+    st, _ = req("PUT", "/api/devices", {"mac": "junk", "name": "x"}, token=token)
+    check(st == 400, "bad device mac -> 400")
+
+    st, s2 = req("GET", f"/api/sessions/{sid}", token=token)
+    check(s2["start_ts_ns"].isdigit() and int(s2["start_ts_ns"]) > 0,
+          "session start_ts_ns for ToD display")
+
     st, mx = req("GET", "/api/metrics", token=token)
     check(all(k in mx for k in ("process", "pool", "sessions", "clients")),
           "metrics shape (NF-2)")
@@ -312,6 +340,11 @@ def phase_after_restart():
     st, nt = req("GET", f"/api/sessions/{milan[0]['id']}/notes", token=token)
     check(nt["markdown"] == "# My notes\n\n- edited via integration test\n",
           "edited notes survived restart")
+
+    st, info = req("GET", f"/api/sessions/{milan[0]['id']}/info", token=token)
+    devs = {d["mac"]: d for d in info["devices"]}
+    check(devs.get("00:1b:92:00:00:01", {}).get("name") == "FOH Rack",
+          "device names survived restart (global store)")
     print(f"after_restart phase: {'OK' if FAILS == 0 else f'{FAILS} FAILURES'}")
 
 

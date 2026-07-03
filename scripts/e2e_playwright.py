@@ -123,6 +123,33 @@ def run_tests(page, url):
     expect(page.get_by_text("Stage Box FOH").first).to_be_visible(timeout=10000)
     expect(page.get_by_text("Monitor Desk").first).to_be_visible()
     expect(page.get_by_text("DISCONNECTED").first).to_be_visible()
+    # Milan v1.2 sections render (the scenario contains a BIND flow).
+    expect(page.get_by_text("Milan listener sinks", exact=False).first
+           ).to_be_visible()
+    expect(page.get_by_text("Milan talker sources", exact=False).first
+           ).to_be_visible()
+
+    # ---- time display mode (rel seconds <-> local time-of-day + ns) --------
+    ts_cell = page.locator(".erow .c-ts").first
+    expect(ts_cell).to_be_visible()
+    assert ts_cell.inner_text().endswith("s"), "rel mode should show seconds"
+    page.locator('#time-mode button[data-mode="tod"]').click()
+    expect(ts_cell).to_have_text(
+        re.compile(r"^([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{9}$"), timeout=5000)
+    page.locator('#time-mode button[data-mode="rel"]').click()
+
+    # ---- info tab: file/capture metadata + device rename --------------------
+    page.locator("#tab-info").click()
+    expect(page.get_by_text("Devices", exact=False).first).to_be_visible(
+        timeout=10000)
+    name_input = page.locator('input.dev-name[data-mac="00:1b:92:00:00:01"]')
+    expect(name_input).to_be_visible()
+    name_input.fill("FOH Rack")
+    name_input.press("Enter")
+    page.wait_for_timeout(300)
+    # The user-set name propagates into the events table SRC column.
+    expect(page.locator(".erow .c-src", has_text="FOH Rack").first
+           ).to_be_visible(timeout=5000)
 
     # ---- investigation notes (FE-9/BE-9) -----------------------------------
     page.locator("#tab-notes").click()

@@ -4,11 +4,13 @@
  */
 #include "api.h"
 
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstring>
+#include <ctime>
 
 #include <fstream>
 #include <shared_mutex>
@@ -56,6 +58,9 @@ void sessionSummary(JsonWriter& w, const Session& s) {
     w.kv("events", (uint64_t)s.eventCount());
     w.kv("decode_errors", s.decodeErrors.load());
     w.kv("duration", s.duration);
+    // Epoch nanoseconds of the first packet, as a string: JS doubles cannot
+    // hold ns-precision epoch values, the frontend needs BigInt.
+    w.kv("start_ts_ns", std::to_string(s.firstTsNanos));
     w.kv("created_at", s.createdAt);
 }
 
@@ -123,6 +128,7 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
     if (p == "/api/sessions" && m == "GET") return handleSessionsGet(resp);
     if (p == "/api/sessions" && m == "POST") return handleSessionsPost(req, resp);
     if (p == "/api/metrics" && m == "GET") return handleMetrics(resp);
+    if (p == "/api/devices" && m == "PUT") return handleDeviceNamePut(req, resp);
 
     std::string id, tail;
     if (splitSessionPath(p, id, tail)) {
@@ -132,6 +138,7 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
         if (tail == "state" && m == "GET") return handleState(id, resp);
         if (tail == "notes" && m == "GET") return handleNotesGet(id, resp);
         if (tail == "notes" && m == "PUT") return handleNotesPut(req, id, resp);
+        if (tail == "info" && m == "GET") return handleInfo(id, resp);
         if (tail.rfind("packets/", 0) == 0 && m == "GET")
             return handlePacket(id, tail.substr(8), resp);
     }
@@ -462,6 +469,112 @@ void Api::handleState(const std::string& id, HttpResponse& resp) {
     auto s = mEngine.find(id);
     if (!s) return jsonError(resp, 404, "no such session " + id);
     resp.body = s->stateJson();
+}
+
+// ------------------------------------------------------------------ info -
+
+namespace {
+
+std::string isoFromSec(time_t t) {
+    if (t <= 0) return "";
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
+}
+
+} // namespace
+
+void Api::handleInfo(const std::string& id, HttpResponse& resp) {
+    auto s = mEngine.find(id);
+    if (!s) return jsonError(resp, 404, "no such session " + id);
+
+    JsonWriter w;
+    w.beginObj();
+
+    // The session's own capture copy (BE-9) — creation time via statx when
+    // the filesystem provides a birth time.
+    w.key("file").beginObj();
+    w.kv("path", s->pcapFilePath);
+    struct stat st{};
+    if (::stat(s->pcapFilePath.c_str(), &st) == 0) {
+        w.kv("size", (uint64_t)st.st_size);
+        w.kv("modified", isoFromSec(st.st_mtime));
+        w.kv("accessed", isoFromSec(st.st_atime));
+        struct statx stx{};
+        std::string created;
+        if (::statx(AT_FDCWD, s->pcapFilePath.c_str(), 0, STATX_BTIME, &stx) == 0 &&
+            (stx.stx_mask & STATX_BTIME))
+            created = isoFromSec((time_t)stx.stx_btime.tv_sec);
+        w.kv("created", created);
+    } else {
+        w.kv("size", (uint64_t)0);
+        w.kv("modified", "");
+        w.kv("accessed", "");
+        w.kv("created", "");
+    }
+    w.endObj();
+
+    w.key("capture").beginObj();
+    w.kv("start_ts_ns", std::to_string(s->firstTsNanos));
+    w.kv("end_ts_ns", std::to_string(s->lastTsNanos));
+    w.kv("start_iso", isoFromSec((time_t)(s->firstTsNanos / 1000000000ull)));
+    w.kv("end_iso", isoFromSec((time_t)(s->lastTsNanos / 1000000000ull)));
+    w.kv("duration", s->duration);
+    w.kv("packets", s->packets.load());
+    w.endObj();
+
+    w.key("session").beginObj();
+    w.kv("id", s->id);
+    w.kv("name", s->name);
+    w.kv("created_at", s->createdAt);
+    w.endObj();
+
+    auto userNames = mStore.deviceNames();
+    w.key("devices").beginArr();
+    {
+        std::lock_guard st2(s->stateMu);
+        for (auto& [mac, dev] : s->devices) {
+            std::string macS = macStr(mac);
+            w.beginObj();
+            w.kv("mac", macS);
+            w.kv("packets", dev.packets);
+            w.key("protocols").beginArr();
+            for (int p = 1; p < kProtoCount; ++p)
+                if (dev.protoMask & (1u << p)) w.value(protoName((Proto)p));
+            w.endArr();
+            w.kv("entity_id", dev.entityId ? idStr(dev.entityId) : "");
+            std::string autoName;
+            if (dev.entityId && s->logic)
+                autoName = s->logic->shared.nameOf(dev.entityId);
+            w.kv("entity_name", autoName);
+            auto it = userNames.find(macS);
+            w.kv("name", it == userNames.end() ? "" : it->second);
+            w.endObj();
+        }
+    }
+    w.endArr();
+
+    w.endObj();
+    resp.body = w.take();
+}
+
+void Api::handleDeviceNamePut(HttpRequest& req, HttpResponse& resp) {
+    JsonValue body = JsonValue::parse(req.body);
+    std::string mac = body.getStr("mac");
+    const JsonValue* nameV = body.get("name");
+    if (mac.size() != 17 || !nameV || nameV->type != JsonValue::Type::String)
+        return jsonError(resp, 400,
+                         "body must be {\"mac\": \"aa:bb:cc:dd:ee:ff\", "
+                         "\"name\": \"...\"}");
+    for (char& c : mac)
+        if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+    std::string name = nameV->str;
+    if (name.size() > 64) return jsonError(resp, 400, "name too long (max 64)");
+    std::string err;
+    if (!mStore.setDeviceName(mac, name, err)) return jsonError(resp, 500, err);
+    resp.body = "{\"ok\":true}";
 }
 
 // --------------------------------------------------------------- metrics -

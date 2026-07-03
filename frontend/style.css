@@ -530,6 +530,27 @@ body {
 .search-in { width: 200px; }
 .shown-counts { color: var(--text-2); white-space: nowrap; }
 
+/* time display mode: segmented control (#time-mode) */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.seg-btn {
+  font: 600 11px var(--mono);
+  letter-spacing: 0.4px;
+  color: var(--text-2);
+  background: var(--raised);
+  border: none;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--border-strong); }
+.seg-btn:hover { background: var(--hover); color: var(--text); }
+.seg-btn[aria-pressed="true"] { background: rgba(106, 176, 243, 0.16); color: var(--accent); }
+.seg-btn:disabled { opacity: 0.45; cursor: default; }
+
 /* ── session view: timeline ──────────────────────────────── */
 
 .tl-wrap {
@@ -609,11 +630,14 @@ body {
 
 .etable-head, .erow {
   display: grid;
-  grid-template-columns: 56px 92px 62px 176px 1fr;
+  grid-template-columns: 56px var(--ts-w, 92px) 62px 160px 130px 130px 1fr;
   gap: 8px;
   align-items: center;
   padding: 0 8px;
 }
+
+/* time-of-day mode: "HH:mm:ss.nnnnnnnnn" needs a wider Time column */
+.events-panel.tod { --ts-w: 142px; }
 
 .etable-head {
   flex: none;
@@ -660,6 +684,7 @@ body {
 .etable-head .c-idx { text-align: right; }
 .c-ts { color: var(--text-2); font-variant-numeric: tabular-nums; }
 .c-type { color: var(--text); }
+.c-src, .c-dst { color: var(--text-2); }
 .c-sum { color: var(--text-2); }
 .erow.iserr .c-type, .erow.iserr .c-sum { color: var(--c-err-text); }
 .kg { font-size: 10px; }
@@ -899,6 +924,47 @@ details.history summary {
 }
 .hist-ts { color: var(--muted); min-width: 76px; font-variant-numeric: tabular-nums; }
 .hist-why { color: var(--text-2); flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* info tab */
+
+.info-note { color: var(--muted); font-size: 11px; margin: 2px 0 0; }
+
+/* device name appended to a MAC field value: "aa:bb:… (FOH Rack)" */
+.dev-nm { color: var(--muted); }
+
+.dev-scroll { overflow-x: auto; }
+
+.dev-head, .dev-row {
+  display: grid;
+  grid-template-columns: 150px 132px minmax(140px, 1fr) 56px minmax(120px, auto);
+  gap: 8px;
+  align-items: center;
+  padding: 3px 0;
+  min-width: 630px;
+}
+
+.dev-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+  padding-bottom: 4px;
+}
+
+.dev-row { border-top: 1px solid var(--border); }
+.dev-row:nth-child(2) { border-top: none; }   /* first row right after the head */
+.dev-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-ent b { font-weight: 600; }
+.dev-protos { display: flex; gap: 3px; flex-wrap: wrap; }
+
+.dev-name {
+  width: 100%;
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+.dev-name.flash-ok { border-color: var(--st-good); box-shadow: 0 0 0 1px var(--st-good); }
+.dev-name.flash-err { border-color: var(--c-err); box-shadow: 0 0 0 1px var(--c-err); }
 
 /* notes tab */
 

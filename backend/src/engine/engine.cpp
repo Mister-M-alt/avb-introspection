@@ -82,6 +82,7 @@ void Engine::analyze(std::shared_ptr<Session> sp) {
     const auto& pkts = pcap.packets();
     s.pindex = pkts;
     s.firstTsNanos = pkts.front().tsNanos;
+    s.lastTsNanos = pkts.back().tsNanos;
     s.duration = pcap.duration();
     s.packets.store(pkts.size());
 
@@ -134,6 +135,23 @@ void Engine::analyze(std::shared_ptr<Session> sp) {
     for (size_t oi = 0; oi < count; ++oi) {
         DecodedPacket& d = decoded[order[oi]];
         if (!d.interesting) continue;
+
+        // Device inventory: who sends what (served by /info).
+        if (d.srcMac) {
+            std::lock_guard st(s.stateMu);
+            auto& dev = s.devices[d.srcMac];
+            dev.packets++;
+            dev.protoMask |= 1u << (int)d.proto;
+            // Associate the source with its ATDECC entity where the frame
+            // proves it: ADP announcements and AECP responses originate from
+            // the entity itself.
+            for (auto& ctx : d.logicCtxs) {
+                if (d.proto == Proto::ADP && ctx.at("message_type") != 2)
+                    dev.entityId = ctx.at("entity_id");
+                else if (d.proto == Proto::AECP && ctx.at("message_type") == 1)
+                    dev.entityId = ctx.at("target_entity_id");
+            }
+        }
 
         if (!d.ok) {
             s.decodeErrors.fetch_add(1);

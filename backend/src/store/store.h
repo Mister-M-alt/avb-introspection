@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -62,16 +63,25 @@ public:
     bool writeNotes(const std::string& id, const std::string& markdown,
                     std::string& err);
 
+    /** User-assigned device names, keyed by MAC ("aa:bb:cc:dd:ee:ff").
+     *  Global — a device keeps its name across sessions (devices.json). */
+    std::map<std::string, std::string> deviceNames() const;
+    bool setDeviceName(const std::string& mac, const std::string& name,
+                       std::string& err); // empty name removes the entry
+
     static std::string nowIso8601();
 
 private:
     bool save(std::string& err);
+
+    bool saveDeviceNames(std::string& err);
 
     std::string mDataDir;
     mutable std::mutex mMu;
     uint64_t mNextPcap = 1, mNextSession = 1;
     std::vector<PcapMeta> mPcaps;
     std::vector<SessionMeta> mSessions;
+    std::map<std::string, std::string> mDeviceNames;
 };
 
 } // namespace avb

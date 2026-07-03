@@ -27,7 +27,11 @@ const MONO_FONT = 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "L
 
 const TOKEN_KEY = 'avb.token';
 const USER_KEY = 'avb.user';
+const TIME_MODE_KEY = 'avb.timeMode';   /* 'rel' | 'tod' */
 const ROW_H = 24;               /* events table row height, px (matches CSS) */
+
+/* exact 17-char colon-separated MAC (used to decorate inspector field values) */
+const MAC_RE = /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/;
 
 /* ────────────────────────── tiny DOM helper ────────────────────────── */
 
@@ -631,9 +635,13 @@ function sessionView(app, id) {
     query: '',
     selected: -1,            /* selected event index i, or -1 */
     lonePacket: 0,           /* packet number shown without a selected event */
-    tab: 'inspect',          /* 'inspect' | 'state' | 'notes' */
+    tab: 'inspect',          /* 'inspect' | 'state' | 'notes' | 'info' */
     stateData: null,
     stateLoading: false,
+    infoData: null,          /* GET /info payload (capture, file, devices) */
+    infoLoading: false,
+    deviceNames: new Map(),  /* mac -> user name || auto entity name */
+    timeMode: localStorage.getItem(TIME_MODE_KEY) === 'tod' ? 'tod' : 'rel',
     entityNames: new Map(),
     packetCache: new Map(),
     progress: null,          /* last WS progress message */
@@ -704,6 +712,22 @@ function sessionView(app, id) {
     }, 150);
   });
 
+  /* time display mode: two-button segmented control (rel = seconds since
+     capture start, tod = local time of day). Enabled once meta arrives with a
+     usable start_ts_ns; updateTimeModeCtl() keeps it in sync. */
+  const timeModeBtns = new Map();
+  const timeModeCtl = h('span', { id: 'time-mode', class: 'seg', role: 'group', 'aria-label': 'time display mode' });
+  for (const m of ['rel', 'tod']) {
+    const b = h('button', {
+      class: 'seg-btn', type: 'button', dataset: { mode: m },
+      'aria-pressed': 'false', disabled: true,
+      title: m === 'rel' ? 'relative — seconds since capture start' : 'local time of day with nanoseconds',
+      onclick: () => setTimeMode(m),
+    }, m);
+    timeModeBtns.set(m, b);
+    timeModeCtl.appendChild(b);
+  }
+
   /* ── timeline DOM ── */
   const tlCanvas = h('canvas');
   const tlTooltip = h('div', { class: 'tl-tooltip', hidden: true });
@@ -729,6 +753,8 @@ function sessionView(app, id) {
     h('span', { class: 'c-ts' }, 'Time'),
     h('span', { class: 'c-proto' }, 'Proto'),
     h('span', { class: 'c-type' }, 'Type'),
+    h('span', { class: 'c-src' }, 'Src'),
+    h('span', { class: 'c-dst' }, 'Dst'),
     h('span', { class: 'c-sum' }, 'Summary'),
   );
   const tableSpacer = h('div', { class: 'etable-spacer' });
@@ -746,7 +772,9 @@ function sessionView(app, id) {
   const tabInspBtn = h('button', { class: 'tab active', type: 'button', onclick: () => setTab('inspect') }, 'Packet inspector');
   const tabStateBtn = h('button', { class: 'tab', type: 'button', onclick: () => setTab('state') }, 'State');
   const tabNotesBtn = h('button', { id: 'tab-notes', class: 'tab', type: 'button', onclick: () => setTab('notes') }, 'Notes');
+  const tabInfoBtn = h('button', { id: 'tab-info', class: 'tab', type: 'button', onclick: () => setTab('info') }, 'Info');
   const inspBody = h('div', { class: 'insp-body' });
+  const eventsPanel = h('div', { class: 'events-panel' }, tableHead, tableBody, tableEmpty);
 
   /* ── assemble ── */
   app.appendChild(
@@ -764,6 +792,8 @@ function sessionView(app, id) {
           h('span', { class: 'chip-group' }, [...kindChips.values()]),
           h('span', { class: 'tb-sep' }),
           searchIn,
+          h('span', { class: 'tb-sep' }),
+          timeModeCtl,
           h('span', { class: 'toolbar-spacer' }),
           shownEl,
         ),
@@ -771,9 +801,9 @@ function sessionView(app, id) {
       ),
       tlWrap,
       h('div', { class: 'session-main' },
-        h('div', { class: 'events-panel' }, tableHead, tableBody, tableEmpty),
+        eventsPanel,
         h('div', { class: 'inspector-panel' },
-          h('div', { class: 'tabs' }, tabInspBtn, tabStateBtn, tabNotesBtn),
+          h('div', { class: 'tabs' }, tabInspBtn, tabStateBtn, tabNotesBtn, tabInfoBtn),
           inspBody,
         ),
       ),
@@ -881,9 +911,11 @@ function sessionView(app, id) {
         : (e.kind === 'error' ? h('span', { class: 'kg kg-err' }, '✕ ') : null);
       frag.appendChild(h('div', { class: cls, dataset: { i: String(i) }, title: e.summary || '' },
         h('span', { class: 'c-idx mono' }, i),
-        h('span', { class: 'c-ts mono' }, fmtTs(e.ts)),
+        h('span', { class: 'c-ts mono' }, fmtTime(e.ts)),
         h('span', { class: 'c-proto' }, h('span', { class: 'badge ' + protoClass(e.proto) }, e.proto)),
         h('span', { class: 'c-type' }, glyph, e.type || ''),
+        macCell('c-src', e.src),
+        macCell('c-dst', e.dst),
         h('span', { class: 'c-sum' }, e.summary || ''),
       ));
     }
@@ -910,6 +942,162 @@ function sessionView(app, id) {
     if (y < tableBody.scrollTop) tableBody.scrollTop = y;
     else if (y + ROW_H > tableBody.scrollTop + tableBody.clientHeight) {
       tableBody.scrollTop = y - tableBody.clientHeight + ROW_H;
+    }
+  }
+
+  /* ────────── time display mode (rel | tod) ────────── */
+
+  let startNsMemoKey = null;   /* memoized BigInt parse of meta.start_ts_ns */
+  let startNsMemo = null;
+
+  /* epoch ns of the first packet as BigInt, or null when unavailable ("0",
+     missing, malformed) — null forces relative mode. */
+  function startNs() {
+    const v = (S.meta && typeof S.meta.start_ts_ns === 'string') ? S.meta.start_ts_ns : '';
+    if (v !== startNsMemoKey) {
+      startNsMemoKey = v;
+      startNsMemo = null;
+      if (/^[1-9][0-9]*$/.test(v)) {
+        try { startNsMemo = BigInt(v); } catch (err) { startNsMemo = null; }
+      }
+    }
+    return startNsMemo;
+  }
+
+  function pad2(x) { return String(x).padStart(2, '0'); }
+
+  /* absolute epoch ns (BigInt) -> "HH:mm:ss.nnnnnnnnn" in LOCAL time:
+     H/M/S from Date at ms precision, plus the full ns-of-second remainder */
+  function fmtTod(absNs) {
+    const d = new Date(Number(absNs / 1000000n));
+    const ns = absNs % 1000000000n;
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds())
+      + '.' + String(ns).padStart(9, '0');
+  }
+
+  /* mode-aware event timestamp: relative seconds or local time of day */
+  function fmtTime(ts) {
+    if (typeof ts !== 'number' || !isFinite(ts)) return '—';
+    const t0 = S.timeMode === 'tod' ? startNs() : null;
+    if (t0 === null) return fmtTs(ts);
+    return fmtTod(t0 + BigInt(Math.round(ts * 1e9)));
+  }
+
+  /* local date + full-precision time-of-day for the Info tab's ns strings */
+  function fmtNsDate(nsStr) {
+    if (typeof nsStr !== 'string' || !/^[1-9][0-9]*$/.test(nsStr)) return '—';
+    let abs;
+    try { abs = BigInt(nsStr); } catch (err) { return '—'; }
+    const d = new Date(Number(abs / 1000000n));
+    return d.toLocaleDateString() + ' ' + fmtTod(abs);
+  }
+
+  /* timeline axis tick label: HH:mm:ss in tod mode (fractional seconds only
+     when the tick step goes sub-second), relative s/ms otherwise */
+  function fmtAxisLabel(t, step) {
+    const t0 = S.timeMode === 'tod' ? startNs() : null;
+    if (t0 === null) return fmtAxis(t, step);
+    const abs = t0 + BigInt(Math.round(t * 1e9));
+    const d = new Date(Number(abs / 1000000n));
+    let out = pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    if (step < 1) {
+      const frac = Number(abs % 1000000000n) / 1e9;
+      const dec = Math.max(1, Math.min(6, -Math.floor(Math.log10(step))));
+      out += frac.toFixed(dec).slice(1);
+    }
+    return out;
+  }
+
+  let shownTimeMode = 'rel';   /* last mode actually rendered */
+
+  function updateTimeModeCtl() {
+    const ok = startNs() !== null;
+    const mode = ok ? S.timeMode : 'rel';   /* no absolute start -> force rel */
+    timeModeCtl.title = ok
+      ? 'time display: relative seconds / local time of day'
+      : 'time-of-day unavailable — this capture has no absolute start timestamp';
+    for (const [m, b] of timeModeBtns) {
+      b.disabled = !ok;
+      b.setAttribute('aria-pressed', mode === m ? 'true' : 'false');
+      b.classList.toggle('active', mode === m);
+    }
+    eventsPanel.classList.toggle('tod', mode === 'tod');   /* widens the Time column */
+    if (mode !== shownTimeMode) {
+      shownTimeMode = mode;
+      scheduleTable();
+      tlSchedule();
+      renderInspector();
+    }
+  }
+
+  function setTimeMode(m) {
+    if (m !== 'rel' && m !== 'tod') return;
+    if (m === 'tod' && startNs() === null) return;
+    S.timeMode = m;
+    try { localStorage.setItem(TIME_MODE_KEY, m); } catch (err) { /* private mode */ }
+    updateTimeModeCtl();
+  }
+
+  /* ────────── device names (GET /info, PUT /devices) ────────── */
+
+  function rebuildDeviceNames() {
+    S.deviceNames.clear();
+    const devs = (S.infoData && S.infoData.devices) || [];
+    for (const d of devs) {
+      const label = d.name || d.entity_name || '';
+      if (d.mac && label) S.deviceNames.set(String(d.mac).toLowerCase(), label);
+    }
+  }
+
+  /* user/auto name for a MAC, or null when unknown */
+  function deviceName(mac) {
+    if (!mac) return null;
+    return S.deviceNames.get(String(mac).toLowerCase()) || null;
+  }
+
+  /* display label for a MAC: user name || auto entity name || the MAC itself */
+  function deviceLabel(mac) {
+    return deviceName(mac) || mac || '';
+  }
+
+  /* table cell for src/dst: label text, full MAC (+ name) in the title */
+  function macCell(cls, mac) {
+    if (!mac) return h('span', { class: cls + ' mono' });
+    const nm = deviceName(mac);
+    return h('span', { class: cls + ' mono', title: nm ? mac + ' — ' + nm : mac }, deviceLabel(mac));
+  }
+
+  /* inspector src/dst span: same labeling, em-dash when absent */
+  function macSpan(mac) {
+    if (!mac) return h('span', { class: 'dim' }, '—');
+    const nm = deviceName(mac);
+    return h('span', { class: 'mono', title: nm ? mac + ' — ' + nm : mac }, deviceLabel(mac));
+  }
+
+  /* inspector field value: when the value is exactly a known MAC, append the
+     device name — "aa:bb:cc:dd:ee:ff (FOH Rack)" — keeping the MAC visible */
+  function fieldVal(v) {
+    const s = String(v);
+    const nm = MAC_RE.test(s) ? deviceName(s) : null;
+    return h('span', { class: 'f-val mono', title: nm ? s : null },
+      s, nm ? h('span', { class: 'dev-nm' }, ' (' + nm + ')') : null);
+  }
+
+  async function loadInfo() {
+    if (S.infoLoading || S.closed) return;
+    S.infoLoading = true;
+    try {
+      const info = await api('/api/sessions/' + encodeURIComponent(id) + '/info');
+      if (S.closed) return;
+      S.infoData = info;
+      rebuildDeviceNames();
+      if (S.tab === 'info') renderInfoTab();
+      else if (S.tab === 'inspect') renderInspector();
+      scheduleTable();               /* src/dst labels may have changed */
+    } catch (err) {
+      if (!S.closed) toast('session info: ' + err.message, 'error');
+    } finally {
+      S.infoLoading = false;
     }
   }
 
@@ -986,6 +1174,7 @@ function sessionView(app, id) {
     tabInspBtn.classList.toggle('active', t === 'inspect');
     tabStateBtn.classList.toggle('active', t === 'state');
     tabNotesBtn.classList.toggle('active', t === 'notes');
+    tabInfoBtn.classList.toggle('active', t === 'info');
     renderInspector();
   }
 
@@ -1008,6 +1197,7 @@ function sessionView(app, id) {
   function renderInspector() {
     if (S.tab === 'state') { renderStateTab(); return; }
     if (S.tab === 'notes') { renderNotesTab(); return; }
+    if (S.tab === 'info') { renderInfoTab(); return; }
     if (S.lonePacket > 0) {
       const holder = h('div', { class: 'insp-scroll' });
       inspBody.replaceChildren(holder);
@@ -1030,16 +1220,16 @@ function sessionView(app, id) {
     metaRows.push(metaRow('packet', e.n > 0
       ? h('span', { class: 'mono' }, '#' + e.n)
       : h('span', { class: 'dim' }, 'derived — no packet')));
-    metaRows.push(metaRow('time', h('span', { class: 'mono' }, fmtTs(e.ts))));
+    metaRows.push(metaRow('time', h('span', { class: 'mono' }, fmtTime(e.ts))));
     metaRows.push(metaRow('proto / kind',
       h('span', { class: 'badge ' + protoClass(e.proto) }, e.proto), ' ',
       h('span', { class: 'dim' }, e.kind)));
     metaRows.push(metaRow('type', h('span', { class: 'mono' }, e.type || '')));
     if (e.src || e.dst) {
       metaRows.push(metaRow('src → dst',
-        h('span', { class: 'mono' }, e.src || '—'),
+        macSpan(e.src),
         h('span', { class: 'dim' }, ' → '),
-        h('span', { class: 'mono' }, e.dst || '—')));
+        macSpan(e.dst)));
     }
     if (e.entity) metaRows.push(metaRow('entity', entityLabel(e.entity)));
     if (e.stream) metaRows.push(metaRow('stream', h('span', { class: 'mono' }, e.stream)));
@@ -1070,7 +1260,7 @@ function sessionView(app, id) {
         h('div', { class: 'layer-fields' },
           Object.entries(e.fields).map(([k, v]) => [
             h('span', { class: 'f-name' }, k),
-            h('span', { class: 'f-val mono' }, typeof v === 'object' ? JSON.stringify(v) : String(v)),
+            fieldVal(typeof v === 'object' ? JSON.stringify(v) : String(v)),
           ]),
         ),
       ));
@@ -1117,7 +1307,7 @@ function sessionView(app, id) {
         h('div', { class: 'layer-fields' },
           (ly.fields || []).map((f) => [
             h('span', { class: 'f-name' }, f.name),
-            h('span', { class: 'f-val mono' }, f.value),
+            fieldVal(f.value),
           ]),
         ),
       ));
@@ -1125,7 +1315,7 @@ function sessionView(app, id) {
       h('div', { class: 'pkt-head' },
         h('b', null, 'packet #' + pkt.n),
         h('span', { class: 'dim mono small' },
-          '  ' + fmtTs(pkt.ts) + ' · ' + pkt.len + ' B'
+          '  ' + fmtTime(pkt.ts) + ' · ' + pkt.len + ' B'
           + (pkt.caplen !== undefined && pkt.caplen !== pkt.len ? ' (captured ' + pkt.caplen + ')' : '')),
       ),
       layers.length ? layers : h('div', { class: 'dim small pad8' }, 'no decoded layers'),
@@ -1179,7 +1369,7 @@ function sessionView(app, id) {
       h('summary', null, 'history (' + hist.length + ')'),
       h('div', { class: 'hist-rows' },
         hist.map((t) => h('div', { class: 'hist-row' },
-          h('span', { class: 'mono hist-ts' }, fmtTs(t.ts)),
+          h('span', { class: 'mono hist-ts' }, fmtTime(t.ts)),
           stateBadge(t.from, true),
           h('span', { class: 'dim' }, '→'),
           stateBadge(t.to, true),
@@ -1258,7 +1448,7 @@ function sessionView(app, id) {
         h('span', { class: 'mono' }, en.entity_id || '')),
       stateBadge(en.state),
       kvList([
-        ['last seen', fmtTs(en.last_seen)],
+        ['last seen', fmtTime(en.last_seen)],
         ['avail idx', en.available_index],
         ['talker srcs', en.talker_sources],
         ['listener sinks', en.listener_sinks],
@@ -1398,6 +1588,7 @@ function sessionView(app, id) {
 
     const gptpPortSec = stateSection('gPTP ports', gptp.ports, (p) => {
       const pd = p.pdelay || {};
+      const md = p.md || {};
       return sobj(
         h('span', null,
           p.name ? h('b', null, p.name + ' ') : null,
@@ -1414,16 +1605,60 @@ function sessionView(app, id) {
             ? pd.last_turnaround_us.toFixed(1) + ' µs (wire)' : undefined)],
           ['req↔resp gap', (typeof pd.last_observed_gap_ms === 'number' && pd.last_observed_gap_ms >= 0
             ? '≈' + pd.last_observed_gap_ms.toFixed(2) + ' ms (capture)' : undefined)],
+          ['MDPdelayReq', md.pdelay_req_state !== 'NOT_ENABLED' ? md.pdelay_req_state : undefined],
+          ['MDPdelayResp', md.pdelay_resp_state !== 'NOT_ENABLED' ? md.pdelay_resp_state : undefined],
+          ['MD resets', md.resets || undefined],
         ]),
-        null, p.history);
+        h('div', { class: 'dim small' },
+          '802.1AS Clause ' + (md.clause || '11') + ' media-dependent machines'),
+        p.history);
     });
+
+    // Milan v1.2 §5.5.3: listener sink state machine + stateless talkers.
+    const milanSinkSec = stateSection('Milan listener sinks (§5.5.3)',
+      st.milan_sinks, (s) => sobj(
+        h('span', { class: 'conn-title' },
+          entityLabel(s.listener_entity),
+          h('span', { class: 'mono dim' }, ':' + s.listener_unique_id)),
+        h('span', null, stateBadge(s.state), ' ',
+          stateBadge(s.probing_status, true)),
+        kvList([
+          ['bound talker', s.bound_talker
+            ? h('span', null, entityLabel(s.bound_talker),
+                h('span', { class: 'mono dim' }, ':' + s.bound_talker_unique_id))
+            : undefined],
+          ['controller', s.controller ? entityLabel(s.controller) : undefined],
+          ['stream', s.stream_id || undefined],
+          ['dest', s.dest_mac || undefined],
+          ['VLAN', s.vlan || undefined],
+          ['probes sent', s.probes_sent],
+        ]),
+        null, s.history));
+
+    const milanTalkerSec = stateSection('Milan talker sources (stateless, §5.5.2.7)',
+      st.milan_talkers, (t) => sobj(
+        h('span', { class: 'conn-title' },
+          entityLabel(t.talker_entity),
+          h('span', { class: 'mono dim' }, ':' + t.talker_unique_id)),
+        stateBadge(t.srp_declaration === 'ADVERTISE' ? 'ADVERTISE'
+          : t.srp_declaration === 'FAILED' ? 'FAILED' : 'NO_SRP', true),
+        kvList([
+          ['probes answered', t.probe_responses + '/' + t.probes_received],
+          ['last status', t.last_status],
+          ['stream', t.stream_id || undefined],
+          ['SRP declaration', t.srp_declaration],
+          ['disconnect_tx seen', t.disconnect_tx_seen || undefined],
+          ['get_tx_connection seen', t.get_tx_connection_seen || undefined],
+        ]),
+        null, t.history));
 
     inspBody.replaceChildren(h('div', { class: 'insp-scroll' },
       h('div', { class: 'state-actions' },
         h('span', { class: 'dim small' }, 'Reconstructed protocol state'),
         h('span', { class: 'toolbar-spacer' }),
         refreshBtn),
-      entitySec, resvSec, vlanSec, domSec, maapSec, connSec, aecpSec,
+      entitySec, resvSec, vlanSec, domSec, maapSec, connSec,
+      milanSinkSec, milanTalkerSec, aecpSec,
       gptpDomSec, gptpPortSec,
     ));
   }
@@ -1524,6 +1759,123 @@ function sessionView(app, id) {
     notesTa.hidden = N.preview;
     notesPreview.hidden = !N.preview;
     if (!N.preview && !notesTa.disabled) notesTa.focus();
+  }
+
+  /* ────────── inspector: info tab ────────── */
+
+  function flashInput(inp, cls) {
+    inp.classList.remove('flash-ok', 'flash-err');
+    inp.classList.add(cls);
+    setTimeout(() => inp.classList.remove(cls), 1200);
+  }
+
+  async function saveDeviceName(d, inp) {
+    const name = inp.value.trim();
+    if (inp.value !== name) inp.value = name;
+    if (!d.mac || name === (d.name || '')) return;   /* unchanged */
+    try {
+      await api('/api/devices', { method: 'PUT', json: { mac: d.mac, name } });
+      if (S.closed) return;
+      d.name = name;                 /* empty string clears the user name */
+      rebuildDeviceNames();
+      flashInput(inp, 'flash-ok');
+      scheduleTable();               /* propagate to src/dst columns */
+      if (S.tab === 'inspect') renderInspector();
+    } catch (err) {
+      if (S.closed) return;
+      flashInput(inp, 'flash-err');
+      toast('device name: ' + err.message, 'error');
+    }
+  }
+
+  function renderInfoTab() {
+    if (!S.infoData) {
+      inspBody.replaceChildren(placeholder(S.infoLoading
+        ? 'Loading session info…' : 'Session info not loaded yet.'));
+      if (!S.infoLoading) loadInfo();
+      return;
+    }
+    const info = S.infoData;
+    const cap = info.capture || {};
+    const f = info.file || {};
+    const sess = info.session || {};
+    const devices = info.devices || [];
+    const refreshBtn = h('button', { class: 'btn btn-sm', type: 'button' }, 'Refresh');
+    refreshBtn.addEventListener('click', () => { S.infoData = null; renderInfoTab(); });
+
+    const path = String(f.path || '');
+    const base = path ? (path.split('/').pop() || path) : '—';
+
+    const capSec = h('section', { class: 'ssec' },
+      h('h3', null, 'Capture'),
+      h('div', { class: 'insp-meta' },
+        metaRow('start', h('span', { class: 'mono' }, fmtNsDate(cap.start_ts_ns))),
+        metaRow('end', h('span', { class: 'mono' }, fmtNsDate(cap.end_ts_ns))),
+        metaRow('duration', h('span', { class: 'mono' }, fmtDur(cap.duration))),
+        metaRow('packets', h('span', { class: 'mono' }, fmtInt(cap.packets))),
+      ));
+
+    const fileSec = h('section', { class: 'ssec' },
+      h('h3', null, 'File'),
+      h('div', { class: 'insp-meta' },
+        metaRow('path', h('span', { class: 'mono', title: path }, base)),
+        metaRow('size', h('span', { class: 'mono' }, fmtBytes(f.size))),
+        metaRow('modified', fmtDate(f.modified)),
+        metaRow('accessed', fmtDate(f.accessed)),
+        metaRow('created', f.created ? fmtDate(f.created) : '—'),
+      ),
+      h('p', { class: 'info-note' },
+        'This is the session’s own copy of the capture, not the original file.'),
+    );
+
+    const sessSec = h('section', { class: 'ssec' },
+      h('h3', null, 'Session'),
+      h('div', { class: 'insp-meta' },
+        metaRow('id', h('span', { class: 'mono' }, sess.id || id)),
+        metaRow('name', sess.name || '—'),
+        metaRow('created', fmtDate(sess.created_at)),
+      ));
+
+    const devRows = devices.map((d) => {
+      const inp = h('input', {
+        class: 'input input-sm dev-name', spellcheck: 'false',
+        dataset: { mac: d.mac || '' },
+        value: d.name || '', placeholder: 'name…',
+        title: 'display name for ' + (d.mac || '') + ' — Enter/blur saves, empty clears',
+      });
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); inp.blur(); }
+      });
+      inp.addEventListener('blur', () => saveDeviceName(d, inp));
+      return h('div', { class: 'dev-row' },
+        inp,
+        h('span', { class: 'mono' }, d.mac || ''),
+        h('span', { class: 'dev-ent' },
+          d.entity_name ? h('b', null, d.entity_name + ' ') : null,
+          d.entity_id
+            ? h('span', { class: 'mono dim small' }, d.entity_id)
+            : (d.entity_name ? null : h('span', { class: 'dim' }, '—'))),
+        h('span', { class: 'num mono' }, fmtInt(d.packets)),
+        h('span', { class: 'dev-protos' },
+          (d.protocols || []).map((p) => h('span', { class: 'badge ' + protoClass(p) }, p))),
+      );
+    });
+    const devSec = h('section', { class: 'ssec' },
+      h('h3', null, 'Devices ', h('span', { class: 'count mono' }, String(devices.length))),
+      h('div', { class: 'dev-scroll' },
+        h('div', { class: 'dev-head' },
+          h('span', null, 'Name'), h('span', null, 'MAC'), h('span', null, 'Entity'),
+          h('span', { class: 'num' }, 'Pkts'), h('span', null, 'Protocols')),
+        devRows.length ? devRows : h('div', { class: 'empty small' }, 'No devices observed.'),
+      ));
+
+    inspBody.replaceChildren(h('div', { class: 'insp-scroll' },
+      h('div', { class: 'state-actions' },
+        h('span', { class: 'dim small' }, 'Session & capture info'),
+        h('span', { class: 'toolbar-spacer' }),
+        refreshBtn),
+      capSec, fileSec, sessSec, devSec,
+    ));
   }
 
   /* ────────── timeline: data ────────── */
@@ -1744,7 +2096,7 @@ function sessionView(app, id) {
       h('div', { class: 'tip-head' },
         h('span', { class: 'badge ' + protoClass(proto) }, proto),
         h('b', null, ' ' + ((e ? e.type : TL.type[k]) || '')),
-        h('span', { class: 'mono dim' }, '  ' + fmtTs(TL.ts[k]))),
+        h('span', { class: 'mono dim' }, '  ' + fmtTime(TL.ts[k]))),
       e && e.summary ? h('div', { class: 'tip-summary' }, e.summary) : null,
     );
     tip.hidden = false;
@@ -1876,7 +2228,7 @@ function sessionView(app, id) {
       if (x < plotL) continue;
       ctx.moveTo(x, 0);
       ctx.lineTo(x, chartB);
-      labels.push([x, fmtAxis(tv, step)]);
+      labels.push([x, fmtAxisLabel(tv, step)]);
     }
     ctx.stroke();
     ctx.fillStyle = '#8b949e';
@@ -1928,7 +2280,7 @@ function sessionView(app, id) {
       ctx.lineTo(x, chartB);
       ctx.stroke();
       drawMark(ctx, Math.round(xOf(TL.ts[selK])), TL.lane[selK], TL.kind[selK], true);
-      const lbl = fmtTs(TL.ts[selK]);
+      const lbl = fmtTime(TL.ts[selK]);
       ctx.font = '10px ' + MONO_FONT;
       const tw = ctx.measureText(lbl).width;
       let lx = Math.min(Math.max(x + 4, plotL + 2), w - tw - 6);
@@ -1993,6 +2345,7 @@ function sessionView(app, id) {
         c.cnt.textContent = typeof v === 'number' ? fmtInt(v) : '';
       }
     }
+    updateTimeModeCtl();
     updateProgress();
     updateCounts();
   }
@@ -2106,6 +2459,7 @@ function sessionView(app, id) {
     await refreshMeta();
     loadCompact();     /* refresh the compact timeline */
     loadState();       /* refresh reconstructed state */
+    loadInfo();        /* refresh device inventory + names */
     updateProgress();
     updateCounts();
   }
@@ -2152,6 +2506,7 @@ function sessionView(app, id) {
 
   renderInspector();
   updateCounts();
+  updateTimeModeCtl();
   tlLayout();
 
   (async () => {
@@ -2165,6 +2520,7 @@ function sessionView(app, id) {
     }
     if (S.closed) return;
     updateHeaderMeta();
+    loadInfo();                /* device names for src/dst labels everywhere */
     if (S.meta.status !== 'running') {
       S.done = true;
       finished = true;         /* a later WS `complete` needs no re-fetch */

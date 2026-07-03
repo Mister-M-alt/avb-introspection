@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -73,7 +74,15 @@ struct Session {
 
     // Packet index for the inspector (offsets into pcapFilePath).
     std::vector<PcapPacket> pindex;
-    uint64_t firstTsNanos = 0;
+    uint64_t firstTsNanos = 0, lastTsNanos = 0;
+
+    /** Devices observed as frame sources (guarded by stateMu). */
+    struct DeviceInfo {
+        uint64_t packets = 0;
+        uint32_t protoMask = 0;  // bit i = (Proto)i seen from this source
+        uint64_t entityId = 0;   // ATDECC entity associated via ADP/AECP
+    };
+    std::map<uint64_t, DeviceInfo> devices;
 
     // State machines (guarded by stateMu; the state pass is single-threaded
     // per CO-3, but /state may be requested concurrently).

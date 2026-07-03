@@ -51,6 +51,8 @@ private:
     void handlePacket(const std::string& id, const std::string& nStr,
                       HttpResponse&);
     void handleState(const std::string& id, HttpResponse&);
+    void handleInfo(const std::string& id, HttpResponse&);
+    void handleDeviceNamePut(HttpRequest&, HttpResponse&);
     void handleMetrics(HttpResponse&);
 
     void streamSession(int fd, const std::string& sessionId,

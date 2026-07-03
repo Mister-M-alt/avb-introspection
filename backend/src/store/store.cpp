@@ -39,6 +39,19 @@ bool Store::init(const std::string& dataDir, std::string& err) {
         }
     }
 
+    // Global device names (survive restarts; independent of sessions).
+    {
+        std::ifstream f(dataDir + "/devices.json");
+        if (f) {
+            std::stringstream ss;
+            ss << f.rdbuf();
+            JsonValue root = JsonValue::parse(ss.str());
+            for (auto& [mac, v] : root.obj)
+                if (v.type == JsonValue::Type::String && !v.str.empty())
+                    mDeviceNames[mac] = v.str;
+        }
+    }
+
     std::ifstream f(dataDir + "/meta.json");
     if (!f) return true; // fresh data dir
     std::stringstream ss;
@@ -256,6 +269,43 @@ bool Store::writeNotes(const std::string& id, const std::string& markdown,
 std::vector<Store::SessionMeta> Store::sessions() const {
     std::lock_guard lk(mMu);
     return mSessions;
+}
+
+std::map<std::string, std::string> Store::deviceNames() const {
+    std::lock_guard lk(mMu);
+    return mDeviceNames;
+}
+
+bool Store::saveDeviceNames(std::string& err) {
+    JsonWriter w;
+    w.beginObj();
+    for (auto& [mac, name] : mDeviceNames) w.kv(mac, name);
+    w.endObj();
+    std::string path = mDataDir + "/devices.json";
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) {
+            err = "cannot write " + tmp;
+            return false;
+        }
+        f << w.str();
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        err = "cannot replace " + path;
+        return false;
+    }
+    return true;
+}
+
+bool Store::setDeviceName(const std::string& mac, const std::string& name,
+                          std::string& err) {
+    std::lock_guard lk(mMu);
+    if (name.empty())
+        mDeviceNames.erase(mac);
+    else
+        mDeviceNames[mac] = name;
+    return saveDeviceNames(err);
 }
 
 } // namespace avb
