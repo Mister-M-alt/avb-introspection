@@ -132,12 +132,32 @@ through TSN-GEN once its serializer lands.
 Runtime metrics (NF-2: per-session packet rates, per-client bytes, CPU/RSS,
 pool utilisation) are at `GET /api/metrics` and shown on the UI home screen.
 
-## Security (SE)
+## Security, users & admin (SE)
 
 Registration + login are required for every API call; passwords are stored
 as Argon2id hashes (libsodium `crypto_pwhash_str`); sessions use random
 64-hex bearer tokens. TLS is not terminated by the backend — put a reverse
 proxy in front for deployments beyond a trusted lab network (OQ-12).
+
+Accounts have roles (`admin`/`user`). Provision the admin from the
+deployment environment — created on first start, or promoted if the
+account already exists:
+
+```bash
+AVB_ADMIN_USER=alex AVB_ADMIN_PASSWORD=change-me ./build/avb-introspectd
+```
+
+Admins get an **Admin** panel in the UI: user management (create/delete,
+roles) and live presence. Everyone sees the presence indicator in the
+header — who is online and which session they are looking at — and
+concurrent notes editing is conflict-safe (revision check with a merge
+prompt instead of silent overwrites).
+
+**Multi-domain outlook:** the tool is designed to eventually serve users
+from different domains (teams/organizations) with full isolation between
+them — domain-scoped data, authorization, quotas, and presence. The agreed
+design is documented in REQUIREMENTS.md §10 ("Multi-user domains — v2
+outlook").
 
 ### Remote deployment
 

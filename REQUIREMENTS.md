@@ -227,3 +227,34 @@ Resolutions of the open questions from draft v0.2:
   `debian:bookworm-slim`. Dependencies: zlib, libsodium.
 - **OQ-12** — *TLS:* confirm whether TLS (via reverse proxy or native) is
   required for v1 remote deployments, or acceptable to defer.
+
+## 10. Multi-user domains — v2 outlook (design, not yet implemented)
+
+v1 already supports multiple concurrent users with roles (`admin`/`user`,
+SE-1..3), presence, and conflict-safe notes editing — but all users share
+one flat data space. The long-term goal is one deployment serving **users
+from different domains (teams/organizations) that must stay isolated from
+one another**. The agreed design to prepare for:
+
+- **Tenancy model** — every user belongs to exactly one *domain*. Roles
+  become domain-scoped: a *domain admin* manages users and data of their
+  domain; a *global admin* (the deployment operator) manages domains and
+  global settings. The v1 `AVB_ADMIN_USER` becomes the first global admin.
+- **Data isolation** — every object is domain-owned: pcap uploads, session
+  folders (captures + notes), and device names move under
+  `data/domains/<domain>/{pcaps,sessions,devices.json}`; `users.json` gains
+  a `domain` field. Device names become per-domain (the same MAC may carry
+  different names in different domains).
+- **Authorization** — every API handler resolves the caller's domain and
+  refuses cross-domain object access, answering **404** (not 403) so object
+  existence does not leak across domains. The admin API splits into
+  `/api/admin/…` (domain scope) and `/api/global/…` (global admin).
+- **Presence and metrics scoping** — presence lists only the caller's
+  domain; per-session metrics likewise. The global admin sees everything.
+- **Resource isolation (NF-3)** — per-domain quotas: upload bytes, stored
+  sessions, concurrent analyses, and WebSocket clients, so one domain cannot
+  starve another on a shared deployment.
+- **Audit** — admin actions (user create/delete, quota changes) recorded in
+  an append-only per-domain audit log.
+- **Migration** — existing single-tenant data moves to a built-in domain
+  named `default`; v1 accounts join it unchanged, preserving BE-8.
