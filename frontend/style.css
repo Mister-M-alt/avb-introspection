@@ -749,6 +749,7 @@ select.input {
   flex-direction: column;
   position: relative;
   min-height: 0;
+  overflow: hidden;           /* narrow pane clips its own content, never spills */
 }
 
 .inspector-panel {
@@ -758,6 +759,7 @@ select.input {
   flex-direction: column;
   min-height: 0;
   background: var(--bg);
+  overflow: hidden;
 }
 
 .events-panel.is-collapsed, .inspector-panel.is-collapsed {
@@ -872,6 +874,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .tabs {
   flex: none;
   display: flex;
+  flex-wrap: wrap;              /* wrap to a second row when the pane is narrow */
   gap: 2px;
   border-bottom: 1px solid var(--border-strong);
   background: var(--panel);
@@ -879,6 +882,8 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 }
 
 .tab {
+  flex: 0 0 auto;              /* keep the label intact; wrap instead of overflow */
+  white-space: nowrap;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -1434,13 +1439,13 @@ input.marker-label { width: 100%; }
 /* edges */
 .sm-edge { fill: none; stroke: #59606b; stroke-width: 1.5; }
 .sm-edge.is-visited {
-  stroke: color-mix(in srgb, var(--sm-accent) 80%, transparent);
-  stroke-width: 1.9;
+  stroke: color-mix(in srgb, var(--sm-accent) 50%, transparent);
+  stroke-width: 1.8;
 }
 .sm-edge.is-recent {
-  stroke: var(--sm-accent);
-  stroke-width: 2.6;
-  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--sm-accent) 70%, transparent));
+  stroke: color-mix(in srgb, var(--sm-accent) 78%, transparent);
+  stroke-width: 2.3;
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--sm-accent) 45%, transparent));
 }
 
 /* clickable transitions: a transparent wide hit-stroke catches the click and a
