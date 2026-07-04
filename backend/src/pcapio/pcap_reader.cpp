@@ -321,8 +321,8 @@ std::string fileLabel(const std::vector<std::string>& names,
 
 bool mergePcaps(const std::vector<std::string>& sources,
                 const std::vector<std::string>& names,
-                const std::string& outPath, std::string& err,
-                PcapMergeResult* out) {
+                const std::string& outPath, const std::string& srcMapPath,
+                std::string& err, PcapMergeResult* out) {
     if (sources.empty()) {
         err = "no source captures to combine";
         return false;
@@ -387,6 +387,26 @@ bool mergePcaps(const std::vector<std::string>& sources,
         err = "failed writing merged capture: " + outPath;
         return false;
     }
+
+    // Sidecar: source index (uint16 LE) per merged packet, in capture order —
+    // lets the inspector attribute each packet to its origin capture.
+    if (!srcMapPath.empty()) {
+        std::ofstream sm(srcMapPath, std::ios::binary);
+        if (!sm) {
+            err = "cannot write source map: " + srcMapPath;
+            return false;
+        }
+        for (const auto& r : refs) {
+            uint16_t sidx = (uint16_t)r.file;
+            sm.write(reinterpret_cast<const char*>(&sidx), 2);
+        }
+        sm.flush();
+        if (!sm) {
+            err = "failed writing source map: " + srcMapPath;
+            return false;
+        }
+    }
+
     if (out) {
         out->firstTsNanos = refs.front().ts;
         out->lastTsNanos = refs.back().ts;

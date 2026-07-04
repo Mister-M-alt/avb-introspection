@@ -146,6 +146,8 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
         if (tail == "info" && m == "GET") return handleInfo(id, resp);
         if (tail.rfind("packets/", 0) == 0 && m == "GET")
             return handlePacket(id, tail.substr(8), resp);
+        if (tail.rfind("sources/", 0) == 0 && m == "PUT")
+            return handleSourceAlias(req, id, tail.substr(8), resp);
     }
 
     jsonError(resp, 404, "no such endpoint: " + m + " " + p);
@@ -435,12 +437,32 @@ void Api::handlePacket(const std::string& id, const std::string& nStr,
 
     auto layers = inspectPacket(bytes);
 
+    // Which source capture this packet came from (combined sessions only): the
+    // sidecar holds one uint16 per packet, in capture order.
+    int srcIdx = -1;
+    {
+        std::ifstream sf(mStore.sessionSrcMapPath(id), std::ios::binary);
+        if (sf) {
+            sf.seekg((std::streamoff)((n - 1) * 2));
+            uint16_t v = 0;
+            if (sf.read(reinterpret_cast<char*>(&v), 2)) srcIdx = (int)v;
+        }
+    }
+
     JsonWriter w;
     w.beginObj();
     w.kv("n", (uint64_t)n);
     w.kv("ts", (double)(p.tsNanos - s->firstTsNanos) / 1e9);
     w.kv("len", (uint64_t)p.origlen);
     w.kv("caplen", (uint64_t)p.caplen);
+    if (srcIdx >= 0) {
+        auto sources = mStore.sessionSources(id);
+        if ((size_t)srcIdx < sources.size()) {
+            w.kv("source_index", (uint64_t)srcIdx);
+            w.kv("source_alias", sources[srcIdx].alias);
+            w.kv("source_name", sources[srcIdx].name);
+        }
+    }
     w.key("layers").beginArr();
     for (auto& l : layers) {
         w.beginObj();
@@ -458,6 +480,23 @@ void Api::handlePacket(const std::string& id, const std::string& nStr,
     w.endArr();
     w.kv("hex", hexDump(bytes));
     w.endObj();
+    resp.body = w.take();
+}
+
+void Api::handleSourceAlias(HttpRequest& req, const std::string& id,
+                            const std::string& idxStr, HttpResponse& resp) {
+    if (!mEngine.find(id)) return jsonError(resp, 404, "no such session " + id);
+    char* end = nullptr;
+    unsigned long long idx = std::strtoull(idxStr.c_str(), &end, 10);
+    if (!end || *end != '\0')
+        return jsonError(resp, 400, "bad source index " + idxStr);
+    JsonValue body = JsonValue::parse(req.body);
+    std::string alias = body.getStr("alias");
+    std::string err;
+    if (!mStore.setSessionAlias(id, (size_t)idx, alias, err))
+        return jsonError(resp, err.find("out of range") != std::string::npos ? 400 : 500, err);
+    JsonWriter w;
+    w.beginObj().kv("index", (uint64_t)idx).kv("alias", alias).endObj();
     resp.body = w.take();
 }
 
@@ -694,6 +733,21 @@ void Api::handleInfo(const std::string& id, HttpResponse& resp) {
     w.kv("name", s->name);
     w.kv("created_at", s->createdAt);
     w.endObj();
+
+    // Source captures this session was combined from (empty for a single pcap).
+    w.key("sources").beginArr();
+    {
+        auto sources = mStore.sessionSources(id);
+        for (size_t i = 0; i < sources.size(); ++i) {
+            w.beginObj();
+            w.kv("index", (uint64_t)i);
+            w.kv("pcap_id", sources[i].pcapId);
+            w.kv("name", sources[i].name);
+            w.kv("alias", sources[i].alias);
+            w.endObj();
+        }
+    }
+    w.endArr();
 
     auto userNames = mStore.deviceNames();
     w.key("devices").beginArr();

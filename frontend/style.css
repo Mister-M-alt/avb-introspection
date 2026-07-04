@@ -1003,6 +1003,32 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .pkt-head { margin: 10px 0 6px; font-size: 12.5px; }
 .pkt-holder { margin-top: 4px; }
 
+/* source-capture attribution (combined sessions): a coloured badge per packet
+   and an editable alias legend in the Info tab, sharing one 6-colour palette */
+.src-c0 { --src: #d55181; }
+.src-c1 { --src: #2fa3a8; }
+.src-c2 { --src: #c98500; }
+.src-c3 { --src: #9085e9; }
+.src-c4 { --src: #199e70; }
+.src-c5 { --src: #3987e5; }
+.pkt-src {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font: 600 10.5px var(--mono);
+  border: 1px solid color-mix(in srgb, var(--src, #888) 60%, var(--border));
+  color: var(--src, #ccc);
+  background: color-mix(in srgb, var(--src, #888) 15%, transparent);
+  white-space: nowrap;
+}
+.src-list { display: flex; flex-direction: column; gap: 7px; margin-top: 4px; }
+.src-row { display: flex; align-items: center; gap: 9px; }
+.src-row .input { flex: 0 0 210px; }
+.src-swatch {
+  width: 13px; height: 13px; border-radius: 3px; flex: none;
+  background: var(--src, #888);
+}
+
 .hexdump {
   margin: 8px 0 4px;
   padding: 8px 10px;

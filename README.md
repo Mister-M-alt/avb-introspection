@@ -125,7 +125,10 @@ treats as an ordinary single-file session. Captures uploaded in any order land
 on a single chronological timeline: **disjoint** windows keep their real gaps
 (e.g. ring-buffer splits, or capture part 1 then part 2), and **overlapping**
 windows — such as two tap points watching the same period — are interleaved
-packet-by-packet by timestamp.
+packet-by-packet by timestamp. Every packet keeps a tag for the **source
+capture** it came from (a per-packet sidecar), shown as a coloured badge in the
+inspector; each source gets an editable **alias** (defaulting to its filename)
+you can rename in the session's Info tab — handy for labelling tap points.
 
 ## Testing
 

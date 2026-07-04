@@ -50,6 +50,8 @@ private:
     void handleNotesPut(HttpRequest&, const std::string& id, HttpResponse&);
     void handlePacket(const std::string& id, const std::string& nStr,
                       HttpResponse&);
+    void handleSourceAlias(HttpRequest&, const std::string& id,
+                           const std::string& idxStr, HttpResponse&);
     void handleState(const std::string& id, HttpResponse&);
     void handleInfo(const std::string& id, HttpResponse&);
     void handleDeviceNamePut(HttpRequest&, HttpResponse&);

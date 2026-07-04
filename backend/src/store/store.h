@@ -31,8 +31,13 @@ public:
     struct SessionMeta {
         std::string id, name, pcapId, path, createdAt;
         // When a session combines several library pcaps into one timeline, all
-        // source ids are recorded here (pcapId holds the first for back-compat).
+        // source ids are recorded here (pcapId holds the first for back-compat),
+        // each with a user-editable display alias (parallel to pcapIds).
         std::vector<std::string> pcapIds;
+        std::vector<std::string> pcapAliases;
+    };
+    struct SessionSource {
+        std::string pcapId, name, alias;
     };
 
     bool init(const std::string& dataDir, std::string& err);
@@ -59,7 +64,15 @@ public:
 
     std::string sessionDir(const std::string& id) const;
     std::string sessionPcapPath(const std::string& id) const;
+    std::string sessionSrcMapPath(const std::string& id) const;
     std::string sessionNotesPath(const std::string& id) const;
+
+    /** Source captures a session was built from, with display aliases. Empty
+     *  for a single-capture session with no recorded sources. */
+    std::vector<SessionSource> sessionSources(const std::string& id) const;
+    /** Rename source #index's alias (persisted). */
+    bool setSessionAlias(const std::string& id, size_t index,
+                         const std::string& alias, std::string& err);
 
     /** Investigation notes (markdown). Read returns "" when absent. */
     std::string readNotes(const std::string& id) const;

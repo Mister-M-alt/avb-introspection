@@ -423,6 +423,26 @@ def run_tests(page, url):
     expect(page.locator(".toolbar .sbadge")).to_have_text("done", timeout=30000)
     assert "7 pkt" in page.locator(".toolbar").inner_text(), \
         "combined session should span both captures (7 packets)"
+    # each packet is tagged with its source capture; the alias is editable
+    page.get_by_role("button", name="Packet inspector").click()
+    page.locator(".erow").first.click()
+    page.wait_for_timeout(400)
+    expect(page.locator(".pkt-src").first).to_be_visible()
+    assert "combine_part1" in page.locator(".pkt-src").first.inner_text(), \
+        "packet inspector should show its source-capture badge"
+    page.locator("#tab-info").click()
+    page.wait_for_timeout(300)
+    src_rows = page.locator(".src-row")
+    expect(src_rows).to_have_count(2)
+    alias_inp = src_rows.first.locator("input")
+    alias_inp.fill("Tap-A")
+    alias_inp.blur()
+    page.wait_for_timeout(400)
+    page.get_by_role("button", name="Packet inspector").click()
+    page.locator(".erow").first.click()
+    page.wait_for_timeout(400)
+    assert "Tap-A" in page.locator(".pkt-src").first.inner_text(), \
+        "renamed source alias should show on the packet badge"
 
     # ---- admin panel ---------------------------------------------------------
     page.locator("#logout-btn").click()

@@ -113,7 +113,7 @@ TEST(merge_disjoint_pcaps_ordered_by_time) {
     PcapMergeResult res;
     // pass B BEFORE A — the merge must still order by capture time.
     CHECK(mergePcaps({tmpFile("mrg_b.pcap"), tmpFile("mrg_a.pcap")}, {"B", "A"},
-                     tmpFile("mrg_out.pcap"), err, &res));
+                     tmpFile("mrg_out.pcap"), "", err, &res));
     CHECK_EQ(res.packets, (size_t)4);
     PcapFile m;
     CHECK(m.open(tmpFile("mrg_out.pcap"), err));
@@ -137,7 +137,8 @@ TEST(merge_overlapping_windows_interleaves) {
     std::string err;
     PcapMergeResult res;
     CHECK(mergePcaps({tmpFile("mrg_ov_a.pcap"), tmpFile("mrg_ov_b.pcap")},
-                     {"A", "B"}, tmpFile("mrg_ov_out.pcap"), err, &res));
+                     {"A", "B"}, tmpFile("mrg_ov_out.pcap"),
+                     tmpFile("mrg_ov_out.src"), err, &res));
     CHECK_EQ(res.packets, (size_t)5);   // nothing dropped — all interleaved
     PcapFile m;
     CHECK(m.open(tmpFile("mrg_ov_out.pcap"), err));
@@ -150,6 +151,16 @@ TEST(merge_overlapping_windows_interleaves) {
     CHECK_EQ(p[2].caplen, 60u);
     CHECK_EQ(p[3].caplen, 64u);
     CHECK_EQ(p[4].caplen, 60u);
+    // source-index sidecar attributes each packet: 0,1,0,1,0 (A,B,A,B,A)
+    std::ifstream sm(tmpFile("mrg_ov_out.src"), std::ios::binary);
+    CHECK((bool)sm);
+    uint16_t sidx[5] = {9, 9, 9, 9, 9};
+    sm.read(reinterpret_cast<char*>(sidx), 10);
+    CHECK_EQ(sidx[0], 0u);
+    CHECK_EQ(sidx[1], 1u);
+    CHECK_EQ(sidx[2], 0u);
+    CHECK_EQ(sidx[3], 1u);
+    CHECK_EQ(sidx[4], 0u);
 }
 
 TEST(merge_then_analyze_spans_both_windows) {
@@ -157,7 +168,7 @@ TEST(merge_then_analyze_spans_both_windows) {
     writeFile(tmpFile("mrg_s_b.pcap"), buildClassic({{1700000020, 0, 60}}));  // +20s
     std::string err;
     CHECK(mergePcaps({tmpFile("mrg_s_a.pcap"), tmpFile("mrg_s_b.pcap")},
-                     {"A", "B"}, tmpFile("mrg_span.pcap"), err, nullptr));
+                     {"A", "B"}, tmpFile("mrg_span.pcap"), "", err, nullptr));
     auto s = runSession(tmpFile("mrg_span.pcap"));
     CHECK_EQ(s->status.load(), (int)Session::Done);
     CHECK_EQ(s->packets.load(), (uint64_t)2);

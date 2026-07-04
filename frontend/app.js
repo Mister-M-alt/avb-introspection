@@ -2516,6 +2516,11 @@ function sessionView(app, id) {
         h('span', { class: 'dim mono small' },
           '  ' + fmtTime(pkt.ts) + ' · ' + pkt.len + ' B'
           + (pkt.caplen !== undefined && pkt.caplen !== pkt.len ? ' (captured ' + pkt.caplen + ')' : '')),
+        pkt.source_alias ? h('span', {
+          class: 'pkt-src src-c' + ((pkt.source_index || 0) % 6),
+          title: 'source capture: ' + (pkt.source_name || pkt.source_alias)
+            + ' — rename in the Info tab',
+        }, '⎘ ' + pkt.source_alias) : null,
       ),
       layers.length ? layers : h('div', { class: 'dim small pad8' }, 'no decoded layers'),
       hexDump(pkt.hex || ''),
@@ -4084,13 +4089,50 @@ function sessionView(app, id) {
         devRows.length ? devRows : h('div', { class: 'empty small' }, 'No devices observed.'),
       ));
 
+    const sources = info.sources || [];
+    const srcSec = sources.length > 1 ? h('section', { class: 'ssec' },
+      h('h3', null, 'Combined sources ', h('span', { class: 'count mono' }, String(sources.length))),
+      h('p', { class: 'info-note' },
+        'This session merges these captures by time. Each packet in the inspector '
+        + 'is tagged with its source; rename the alias here (Enter/blur saves).'),
+      h('div', { class: 'src-list' },
+        sources.map((sc) => {
+          const inp = h('input', {
+            class: 'input input-sm', spellcheck: 'false',
+            value: sc.alias || sc.name || '', placeholder: 'alias…',
+            title: 'display alias for ' + (sc.name || sc.pcap_id),
+          });
+          inp.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') { ev.preventDefault(); inp.blur(); }
+          });
+          inp.addEventListener('blur', () => saveSourceAlias(sc.index, inp));
+          return h('div', { class: 'src-row' },
+            h('span', { class: 'src-swatch src-c' + (sc.index % 6) }),
+            inp,
+            h('span', { class: 'mono dim small', title: sc.pcap_id }, sc.name || sc.pcap_id));
+        }))) : null;
+
     inspBody.replaceChildren(h('div', { class: 'insp-scroll' },
       h('div', { class: 'state-actions' },
         h('span', { class: 'dim small' }, 'Session & capture info'),
         h('span', { class: 'toolbar-spacer' }),
         refreshBtn),
-      capSec, fileSec, sessSec, devSec,
+      capSec, fileSec, sessSec, srcSec, devSec,
     ));
+  }
+
+  async function saveSourceAlias(index, inp) {
+    const alias = inp.value.trim();
+    try {
+      await api('/api/sessions/' + encodeURIComponent(id) + '/sources/' + index,
+        { method: 'PUT', json: { alias } });
+      if (S.infoData && (S.infoData.sources || [])[index])
+        S.infoData.sources[index].alias = alias;
+      S.packetCache.clear();   /* badges re-fetch with the new alias */
+      toast('source alias saved');
+    } catch (err) {
+      toast('alias save failed: ' + err.message, 'error');
+    }
   }
 
   /* ────────── timeline: data ────────── */

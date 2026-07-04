@@ -73,9 +73,12 @@ bool Store::init(const std::string& dataDir, std::string& err) {
     if (auto* arr = root.get("sessions"); arr)
         for (auto& s : arr->arr) {
             SessionMeta sm{s.getStr("id"), s.getStr("name"), s.getStr("pcap_id"),
-                           s.getStr("path"), s.getStr("created_at"), {}};
+                           s.getStr("path"), s.getStr("created_at"), {}, {}};
             if (auto* ids = s.get("pcap_ids"); ids)
                 for (auto& v : ids->arr) sm.pcapIds.push_back(v.str);
+            if (auto* al = s.get("pcap_aliases"); al)
+                for (auto& v : al->arr) sm.pcapAliases.push_back(v.str);
+            sm.pcapAliases.resize(sm.pcapIds.size());  // keep parallel
             mSessions.push_back(std::move(sm));
         }
     return true;
@@ -107,6 +110,9 @@ bool Store::save(std::string& err) {
         if (!s.pcapIds.empty()) {
             w.key("pcap_ids").beginArr();
             for (auto& pid : s.pcapIds) w.value(pid);
+            w.endArr();
+            w.key("pcap_aliases").beginArr();
+            for (auto& a : s.pcapAliases) w.value(a);
             w.endArr();
         }
         w.endObj();
@@ -187,6 +193,46 @@ std::string Store::sessionDir(const std::string& id) const {
 std::string Store::sessionPcapPath(const std::string& id) const {
     return sessionDir(id) + "/capture.pcap";
 }
+std::string Store::sessionSrcMapPath(const std::string& id) const {
+    return sessionDir(id) + "/capture.src";
+}
+
+std::vector<Store::SessionSource> Store::sessionSources(const std::string& id) const {
+    std::lock_guard lk(mMu);
+    std::vector<SessionSource> out;
+    for (auto& s : mSessions) {
+        if (s.id != id) continue;
+        for (size_t i = 0; i < s.pcapIds.size(); ++i) {
+            std::string name;
+            for (auto& p : mPcaps)
+                if (p.id == s.pcapIds[i]) { name = p.name; break; }
+            std::string alias = i < s.pcapAliases.size() && !s.pcapAliases[i].empty()
+                                    ? s.pcapAliases[i]
+                                    : (name.empty() ? s.pcapIds[i] : name);
+            out.push_back({s.pcapIds[i], name, alias});
+        }
+        break;
+    }
+    return out;
+}
+
+bool Store::setSessionAlias(const std::string& id, size_t index,
+                            const std::string& alias, std::string& err) {
+    std::lock_guard lk(mMu);
+    for (auto& s : mSessions) {
+        if (s.id != id) continue;
+        if (index >= s.pcapIds.size()) {
+            err = "source index out of range";
+            return false;
+        }
+        if (s.pcapAliases.size() < s.pcapIds.size())
+            s.pcapAliases.resize(s.pcapIds.size());
+        s.pcapAliases[index] = alias;
+        return save(err);
+    }
+    err = "no such session " + id;
+    return false;
+}
 std::string Store::sessionNotesPath(const std::string& id) const {
     return sessionDir(id) + "/notes.md";
 }
@@ -210,6 +256,8 @@ std::string Store::addSession(SessionMeta meta, std::string& err) {
             srcNames.push_back(nameOf(pid));
         }
         if (meta.pcapId.empty()) meta.pcapId = meta.pcapIds.front();
+        // Default alias for each source is its capture name; user-editable.
+        meta.pcapAliases = srcNames;
     } else if (!meta.pcapId.empty()) {
         srcPaths.push_back(pcapPath(meta.pcapId));
         srcNames.push_back(nameOf(meta.pcapId));
@@ -235,9 +283,10 @@ std::string Store::addSession(SessionMeta meta, std::string& err) {
             return "";
         }
     } else {
-        // Merge the sources into one chronological capture.pcap; everything
-        // downstream then treats it as an ordinary single-file session.
-        if (!mergePcaps(srcPaths, srcNames, sessionPcapPath(meta.id), err)) {
+        // Merge the sources into one chronological capture.pcap (+ a per-packet
+        // source-index sidecar); downstream treats it as a single-file session.
+        if (!mergePcaps(srcPaths, srcNames, sessionPcapPath(meta.id),
+                        sessionSrcMapPath(meta.id), err)) {
             std::filesystem::remove_all(sessionDir(meta.id), ec);
             return ""; // err set by mergePcaps
         }

@@ -65,10 +65,14 @@ struct PcapMergeResult {
  * or OVERLAP (e.g. two tap points, interleaved packet-by-packet). The only
  * failure (returns false + err) is a source that can't be opened / isn't an
  * Ethernet capture. `names[i]` is a human label for sources[i] used in errors.
+ *
+ * When srcMapPath is non-empty, also writes a sidecar: one little-endian
+ * uint16 per merged packet (in capture order) = the 0-based index into
+ * `sources` it came from, so the inspector can show each packet's origin.
  */
 bool mergePcaps(const std::vector<std::string>& sources,
                 const std::vector<std::string>& names,
-                const std::string& outPath, std::string& err,
-                PcapMergeResult* out = nullptr);
+                const std::string& outPath, const std::string& srcMapPath,
+                std::string& err, PcapMergeResult* out = nullptr);
 
 } // namespace avb
