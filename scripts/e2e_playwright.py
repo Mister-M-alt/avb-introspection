@@ -222,6 +222,20 @@ def run_tests(page, url):
             "arrow-click popover shows no triggering events"
         page.keyboard.press("Escape")
         page.wait_for_timeout(80)
+    # Every ACMP sink shows its talker/listener as ENTITY_ID(NAME):STREAM_UNIQUE_ID.
+    for i in range(nodes.count()):
+        nodes.nth(i).click()
+        page.wait_for_timeout(150)
+        if page.locator("#topo-machine-acmp").count():
+            eps = page.locator(".acmp-eps").first
+            expect(eps).to_be_visible()
+            txt = eps.inner_text()
+            assert "Talker" in txt and "Listener" in txt, \
+                f"ACMP card missing talker/listener labels: {txt!r}"
+            import re as _re
+            assert _re.search(r"0x[0-9a-fA-F]+.*:\d", txt), \
+                f"ACMP endpoint not in ENTITY_ID(NAME):UID form: {txt!r}"
+            break
     # Clicking a different device switches the panel to its machines.
     first_sel = page.locator(".topo-node.is-selected").get_attribute("data-mac")
     other = None

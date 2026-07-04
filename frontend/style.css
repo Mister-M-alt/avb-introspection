@@ -1367,6 +1367,22 @@ input.marker-label { width: 100%; }
 .sm-group-dot { width: 9px; height: 9px; border-radius: 2px; background: var(--pc); flex: none; }
 .sm-group-title { font-weight: 700; font-size: 12.5px; color: var(--text); }
 .sm-group.is-collapsed > .sm-group-body { display: none; }
+/* ACMP talker/listener/stream identity, ENTITY_ID(NAME):STREAM_UNIQUE_ID */
+.acmp-eps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.acmp-ep-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; }
+.acmp-ep-k { color: var(--muted); min-width: 58px; }
+.acmp-ep { color: var(--text-2); word-break: break-all; }
+.acmp-ep-id { color: var(--text); }
+.acmp-ep-name { color: var(--c-acmp, #d55181); font-weight: 600; }
+.acmp-ep-uid { color: var(--text); }
+.acmp-ep.dim { color: var(--muted); }
+
 .machine-note {
   margin-top: 8px;
   font-size: 11px;

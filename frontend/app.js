@@ -3378,6 +3378,16 @@ function sessionView(app, id) {
         : h('div', { class: 'empty small' }, 'No network-wide protocol state observed yet (gPTP / MSRP / MAAP).'));
   }
 
+  /* ACMP endpoint as ENTITY_ID(NAME):STREAM_UNIQUE_ID (name only when known) */
+  function acmpEndpoint(entityId, uid) {
+    if (!entityId || isZeroId(entityId)) return h('span', { class: 'acmp-ep dim' }, '— (unbound)');
+    const name = S.entityNames.get(entityId);
+    return h('span', { class: 'acmp-ep' },
+      h('span', { class: 'mono acmp-ep-id' }, entityId),
+      name ? h('span', { class: 'acmp-ep-name' }, '(' + name + ')') : null,
+      h('span', { class: 'mono acmp-ep-uid' }, ':' + (uid != null ? uid : '?')));
+  }
+
   /* every reconstructed machine for one device, bound to its live data */
   function topoMachinesPanel(n) {
     const adp = [], gptpC = [], acmp = [], mrp = [];
@@ -3393,7 +3403,19 @@ function sessionView(app, id) {
     ports.forEach((p, i) => gptpC.push(topoPortCard(p, topoSelPort ? 0 : i)));
     (n.milanSinks || []).forEach((s, i) => {
       const def = Object.assign({}, ACMP_MACHINE, { svgId: i === 0 ? 'topo-machine-acmp' : 'topo-machine-acmp-' + i });
-      acmp.push(machineCard(def, sinkLive(s), null));
+      const card = machineCard(def, sinkLive(s), null);
+      /* ENTITY_ID(NAME):STREAM_UNIQUE_ID for the talker source and listener sink,
+         plus the StreamID — shown in the header so it stays visible when folded */
+      const head = card.querySelector('.machine-head');
+      if (head) head.appendChild(h('div', { class: 'acmp-eps' },
+        h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Talker '),
+          acmpEndpoint(s.bound_talker, s.bound_talker_unique_id)),
+        h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Listener '),
+          acmpEndpoint(s.listener_entity, s.listener_unique_id)),
+        (s.stream_id && !isZeroId(s.stream_id))
+          ? h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'StreamID '),
+              h('span', { class: 'mono acmp-ep-id' }, s.stream_id)) : null));
+      acmp.push(card);
       /* talker-discovery machine for this bound sink */
       adp.push(machineCard(Object.assign({}, ADP_DISCOVERY_MACHINE,
         { svgId: i === 0 ? 'topo-machine-adp-discovery' : 'topo-machine-adp-discovery-' + i }),
