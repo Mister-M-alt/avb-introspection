@@ -288,6 +288,37 @@ def run_tests(page, url):
         page.wait_for_timeout(100)
         expect(page.locator(".smpop")).to_have_count(0)
 
+    # ---- resizable split: a visible gutter resizes the table/inspector and
+    #      can fully collapse either pane; double-click resets. --------------
+    gutter = page.locator(".gutter")
+    expect(gutter).to_be_visible()
+    def epwidth():
+        return page.locator(".events-panel").evaluate(
+            "el => el.getBoundingClientRect().width")
+    w0 = epwidth()
+    gb = gutter.bounding_box()
+    cy = gb["y"] + gb["height"] / 2
+    # drag left -> table narrows
+    page.mouse.move(gb["x"] + gb["width"] / 2, cy)
+    page.mouse.down()
+    page.mouse.move(400, cy, steps=6)
+    page.mouse.up()
+    page.wait_for_timeout(120)
+    assert epwidth() < w0 - 80, "dragging the gutter did not resize the split"
+    # drag to the right edge -> inspector fully collapses
+    gb = page.locator(".gutter").bounding_box()
+    page.mouse.move(gb["x"] + gb["width"] / 2, cy)
+    page.mouse.down()
+    page.mouse.move(page.viewport_size["width"] - 4, cy, steps=6)
+    page.mouse.up()
+    page.wait_for_timeout(120)
+    expect(page.locator(".inspector-panel.is-collapsed")).to_have_count(1)
+    # double-click resets to the default split (inspector visible again)
+    page.locator(".gutter").dblclick()
+    page.wait_for_timeout(120)
+    expect(page.locator(".inspector-panel.is-collapsed")).to_have_count(0)
+    assert abs(epwidth() - w0) < 40, "double-click did not reset the split"
+
     # ---- investigation notes (FE-9/BE-9) -----------------------------------
     page.locator("#tab-notes").click()
     notes = page.locator("#notes-editor")

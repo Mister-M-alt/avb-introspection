@@ -1890,7 +1890,11 @@ function sessionView(app, id) {
     h('div', { class: 'tabs' }, tabInspBtn, tabStateBtn, tabNotesBtn, tabMarkersBtn, tabInfoBtn, tabTopologyBtn),
     inspBody,
   );
-  const mainSplit = h('div', { class: 'session-main' }, eventsPanel, inspectorPanel);
+  const splitGutter = h('div', {
+    class: 'gutter', role: 'separator', 'aria-orientation': 'vertical',
+    title: 'drag to resize · double-click to reset · drag to an edge to collapse',
+  });
+  const mainSplit = h('div', { class: 'session-main' }, eventsPanel, splitGutter, inspectorPanel);
 
   /* ── assemble ── */
   app.appendChild(
@@ -4531,11 +4535,44 @@ function sessionView(app, id) {
   let splitDrag = false;
 
   function applySplit(pct) {
-    pct = Math.min(85, Math.max(15, pct));
+    pct = Math.min(100, Math.max(0, pct));   /* full range so either side collapses */
     eventsPanel.style.flex = '0 0 ' + pct.toFixed(1) + '%';
+    eventsPanel.classList.toggle('is-collapsed', pct < 3.5);   /* table hidden */
+    inspectorPanel.classList.toggle('is-collapsed', pct > 96.5); /* inspector hidden */
     try { localStorage.setItem(SPLIT_KEY, pct.toFixed(1)); } catch (err) { /* ignore */ }
     scheduleTable();             /* visible row window may have changed */
   }
+
+  /* visible divider: normal left-drag resizes; double-click resets to default;
+     dragging to an edge fully collapses that pane (the gutter stays grabbable) */
+  const DEFAULT_SPLIT = 58;
+  let gutterDrag = false;
+  function gutterMove(ev) {
+    if (!gutterDrag) return;
+    const rect = mainSplit.getBoundingClientRect();
+    const column = getComputedStyle(mainSplit).flexDirection === 'column';
+    const frac = column
+      ? (ev.clientY - rect.top) / Math.max(1, rect.height)
+      : (ev.clientX - rect.left) / Math.max(1, rect.width);
+    applySplit(frac * 100);
+  }
+  splitGutter.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    gutterDrag = true;
+    document.body.classList.add('col-resizing');
+    try { splitGutter.setPointerCapture(ev.pointerId); } catch (err) { /* ignore */ }
+  });
+  splitGutter.addEventListener('pointermove', gutterMove);
+  const endGutter = (ev) => {
+    if (!gutterDrag) return;
+    gutterDrag = false;
+    document.body.classList.remove('col-resizing');
+    try { splitGutter.releasePointerCapture(ev.pointerId); } catch (err) { /* ignore */ }
+  };
+  splitGutter.addEventListener('pointerup', endGutter);
+  splitGutter.addEventListener('pointercancel', endGutter);
+  splitGutter.addEventListener('dblclick', () => applySplit(DEFAULT_SPLIT));
 
   function splitFromPointer(ev) {
     const rect = mainSplit.getBoundingClientRect();
@@ -4560,11 +4597,9 @@ function sessionView(app, id) {
   mainSplit.addEventListener('contextmenu', (ev) => { if (ev.shiftKey) ev.preventDefault(); });
 
   {
-    /* restore the stored split */
+    /* restore the stored split (incl. a collapsed pane) */
     const storedSplit = parseFloat(localStorage.getItem(SPLIT_KEY) || '');
-    if (storedSplit >= 15 && storedSplit <= 85) {
-      eventsPanel.style.flex = '0 0 ' + storedSplit + '%';
-    }
+    if (storedSplit >= 0 && storedSplit <= 100) applySplit(storedSplit);
   }
 
   /* timeline lane-height resize (shift+right-drag vertically) */

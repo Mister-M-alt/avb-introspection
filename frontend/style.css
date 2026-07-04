@@ -744,22 +744,52 @@ select.input {
 
 .events-panel {
   flex: 1.4;
-  min-width: 360px;
+  min-width: 0;               /* the gutter is the control — allow full collapse */
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
   position: relative;
   min-height: 0;
 }
 
 .inspector-panel {
   flex: 1;
-  min-width: 320px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--bg);
 }
+
+.events-panel.is-collapsed, .inspector-panel.is-collapsed {
+  overflow: hidden;
+  border: none;
+}
+
+/* draggable divider between the event table and the inspector */
+.gutter {
+  flex: none;
+  width: 7px;
+  align-self: stretch;
+  cursor: col-resize;
+  background: var(--border);
+  position: relative;
+  z-index: 3;
+  transition: background 0.12s;
+}
+.gutter::before {          /* grip */
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 3px; height: 30px;
+  transform: translate(-50%, -50%);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text) 32%, transparent);
+}
+.gutter:hover, body.col-resizing .gutter { background: var(--accent); }
+.gutter:hover::before, body.col-resizing .gutter::before {
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+}
+body.col-resizing { cursor: col-resize; user-select: none; }
 
 /* events table */
 
@@ -1704,9 +1734,12 @@ input.marker-label { width: 100%; }
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-gptp) 40%, transparent);
 }
 
-/* narrow screens: stack the split */
+/* narrow screens: stack the split; the gutter becomes a horizontal bar */
 @media (max-width: 900px) {
   .session-main { flex-direction: column; }
-  .events-panel { border-right: none; border-bottom: 1px solid var(--border); min-height: 200px; }
+  .events-panel { min-height: 0; }
   .inspector-panel { min-width: 0; }
+  .gutter { width: auto; height: 7px; cursor: row-resize; }
+  .gutter::before { width: 30px; height: 3px; }
+  body.col-resizing { cursor: row-resize; }
 }
