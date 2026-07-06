@@ -107,10 +107,11 @@ Response: `{"pcaps": [{"id": "p1", "name": "trace.pcap", "size": 12345,
 ### POST /api/pcaps?name=trace.pcap
 
 Body: raw pcap/pcapng bytes (`application/octet-stream`), optionally
-compressed (gzip, xz, zstd, bzip2, lz4, lzip, compress — detected by magic
-bytes and inflated server-side through the matching system tool; the
+compressed (gzip, xz, zstd, bzip2, lz4, lzip, compress, or a `.zip`
+archive — detected by magic bytes and inflated server-side through the
+matching system tool; for a zip the pcap/pcapng entry is extracted). The
 stored capture and reported `size` are the decompressed bytes, and a known
-compression suffix is stripped from `name`). `POST /api/sessions` with
+compression suffix is stripped from `name`. `POST /api/sessions` with
 `path` accepts compressed files the same way.
 Response 201: `{"id": "p1", "name": "trace.pcap", "size": 12345}`.
 400 if the file is not a valid pcap/pcapng (after decompression).

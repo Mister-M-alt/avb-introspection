@@ -602,12 +602,12 @@ function homeView(app) {
     h('span', { class: 'combine-msg dim small' }), h('span', { class: 'toolbar-spacer' }), combineBtn);
   const fileIn = h('input', {
     type: 'file', hidden: true,
-    accept: '.pcap,.pcapng,.cap,.gz,.xz,.zst,.zstd,.bz2,.lz4,.lz,.Z',
+    accept: '.pcap,.pcapng,.cap,.gz,.xz,.zst,.zstd,.bz2,.lz4,.lz,.Z,.zip',
     onchange: () => { if (fileIn.files && fileIn.files[0]) uploadFile(fileIn.files[0]); },
   });
   const uploadBtn = h('button', {
     class: 'btn btn-primary', type: 'button',
-    title: 'pcap / pcapng, optionally compressed (.gz .xz .zst .bz2 .lz4 .lz .Z)',
+    title: 'pcap / pcapng, optionally compressed (.gz .xz .zst .bz2 .lz4 .lz .Z .zip)',
     onclick: () => { fileIn.value = ''; fileIn.click(); },
   }, 'Upload pcap…');
   const newFolderBtn = h('button', {
@@ -646,7 +646,7 @@ function homeView(app) {
           h('div', { class: 'path-row' }, pathIn, openBtn),
           h('p', { class: 'dim small' },
             'Path must be visible to the backend (e.g. a mounted volume). pcap and pcapng are accepted, '
-            + 'optionally compressed (.gz .xz .zst .bz2 .lz4 .lz .Z).'),
+            + 'optionally compressed (.gz .xz .zst .bz2 .lz4 .lz .Z .zip).'),
         ),
       ),
       sessPanel,

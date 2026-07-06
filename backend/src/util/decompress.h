@@ -4,9 +4,9 @@
  *
  * Compressed-capture support: detect the compression format by magic bytes
  * and inflate through the matching system decompressor (gzip, xz, zstd,
- * bzip2, lz4, lzip — whatever the host has installed). Keeping the codecs
- * external means "any compression format supported on this Linux" without
- * linking N libraries.
+ * bzip2, lz4, lzip, and .zip archives via unzip — whatever the host has
+ * installed). Keeping the codecs external means "any compression format
+ * supported on this Linux" without linking N libraries.
  */
 #pragma once
 

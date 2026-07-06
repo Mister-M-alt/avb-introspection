@@ -97,6 +97,7 @@ TEST(compression_magic_detection) {
     const unsigned char zst[] = {0x28, 0xb5, 0x2f, 0xfd};
     const unsigned char bz[] = {'B', 'Z', 'h', '9'};
     const unsigned char lz4[] = {0x04, 0x22, 0x4d, 0x18};
+    const unsigned char zip[] = {'P', 'K', 0x03, 0x04};
     const unsigned char pcap[] = {0xd4, 0xc3, 0xb2, 0xa1};
     const unsigned char pcapng[] = {0x0a, 0x0d, 0x0d, 0x0a};
     CHECK_EQ(compressionTool(gz, sizeof gz), std::string("gzip"));
@@ -104,12 +105,14 @@ TEST(compression_magic_detection) {
     CHECK_EQ(compressionTool(zst, sizeof zst), std::string("zstd"));
     CHECK_EQ(compressionTool(bz, sizeof bz), std::string("bzip2"));
     CHECK_EQ(compressionTool(lz4, sizeof lz4), std::string("lz4"));
+    CHECK_EQ(compressionTool(zip, sizeof zip), std::string("unzip"));
     CHECK_EQ(compressionTool(pcap, sizeof pcap), std::string());
     CHECK_EQ(compressionTool(pcapng, sizeof pcapng), std::string());
     CHECK_EQ(compressionTool(gz, 1), std::string());  // too short to tell
 
     CHECK_EQ(stripCompressionSuffix("trace.pcap.gz"), std::string("trace.pcap"));
     CHECK_EQ(stripCompressionSuffix("trace.pcapng.zst"), std::string("trace.pcapng"));
+    CHECK_EQ(stripCompressionSuffix("trace.pcap.zip"), std::string("trace.pcap"));
     CHECK_EQ(stripCompressionSuffix("trace.pcap"), std::string("trace.pcap"));
 }
 
@@ -133,4 +136,32 @@ TEST(decompress_gzip_roundtrip) {
     // A missing tool reports a clear error instead of a silent failure.
     CHECK(!decompressFile("definitely-not-a-real-tool", gz, out, err));
     CHECK(err.find("not installed") != std::string::npos);
+}
+
+TEST(decompress_zip_extracts_capture) {
+    // A zip holding a pcap (behind a decoy entry) should yield that pcap's
+    // bytes — extraction uses `unzip`, part of the base image the backend runs
+    // on. Build the archive with python3's zipfile so no `zip` binary is
+    // required; skip if the host has neither (the e2e still covers this path).
+    std::string dir = "build/test-zip";
+    std::filesystem::create_directories(dir);
+    std::string zip = dir + "/bundle.zip", out = dir + "/out.bin";
+    std::filesystem::remove(zip);
+    std::string mk = "python3 - <<'PY'\n"
+                     "import zipfile\n"
+                     "z = zipfile.ZipFile('" + zip + "', 'w')\n"
+                     "z.writestr('readme.txt', 'notes')\n"
+                     "z.writestr('trace.pcap', 'PCAP-BYTES-HERE')\n"
+                     "z.close()\n"
+                     "PY\n";
+    if (std::system(mk.c_str()) != 0 || !std::filesystem::exists(zip)) {
+        CHECK(true);   // no zip builder available — skip the extraction check
+        return;
+    }
+    std::string err;
+    CHECK(decompressFile("unzip", zip, out, err));
+    std::ifstream f(out);
+    std::string got((std::istreambuf_iterator<char>(f)),
+                    std::istreambuf_iterator<char>());
+    CHECK_EQ(got, std::string("PCAP-BYTES-HERE"));
 }
