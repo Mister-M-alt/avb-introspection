@@ -454,13 +454,34 @@ body {
 
 .prow {
   display: grid;
-  grid-template-columns: auto minmax(120px, 1fr) 80px 150px auto;
+  grid-template-columns: auto minmax(120px, 1fr) 80px 150px auto auto auto;
   gap: 10px;
   align-items: center;
   padding: 6px 4px;
   border-top: 1px solid var(--border);
 }
 .prow-chk { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.prow.in-folder { padding-left: 26px; }
+.prow.is-dragging { opacity: 0.5; }
+.prow-move { max-width: 130px; }
+
+/* library folder header — also the drop target when dragging a capture */
+.pfolder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.pfolder:hover { background: var(--hover); }
+.pfolder-name { font-weight: 600; }
+.pfolder.is-drop, .panel-head.is-drop {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  border-radius: 6px;
+}
 
 /* combine-selected action bar above the pcap list */
 .combine-bar {

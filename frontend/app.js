@@ -580,13 +580,20 @@ function homeView(app) {
   const combineBar = h('div', { class: 'combine-bar', hidden: true },
     h('span', { class: 'combine-msg dim small' }), h('span', { class: 'toolbar-spacer' }), combineBtn);
   const fileIn = h('input', {
-    type: 'file', accept: '.pcap,.pcapng,.cap', hidden: true,
+    type: 'file', hidden: true,
+    accept: '.pcap,.pcapng,.cap,.gz,.xz,.zst,.zstd,.bz2,.lz4,.lz,.Z',
     onchange: () => { if (fileIn.files && fileIn.files[0]) uploadFile(fileIn.files[0]); },
   });
   const uploadBtn = h('button', {
     class: 'btn btn-primary', type: 'button',
+    title: 'pcap / pcapng, optionally compressed (.gz .xz .zst .bz2 .lz4 .lz .Z)',
     onclick: () => { fileIn.value = ''; fileIn.click(); },
   }, 'Upload pcap…');
+  const newFolderBtn = h('button', {
+    class: 'btn btn-sm', type: 'button',
+    title: 'create a library folder to organise captures',
+    onclick: () => newFolder(),
+  }, 'New folder…');
   const pathIn = h('input', {
     class: 'input mono', placeholder: '/data/traces/capture.pcap', spellcheck: 'false',
     onkeydown: (ev) => { if (ev.key === 'Enter') openPath(); },
@@ -608,7 +615,8 @@ function homeView(app) {
       metricsBox,
       h('div', { class: 'home-cols' },
         h('section', { class: 'panel' },
-          h('div', { class: 'panel-head' }, h('h2', null, 'Uploaded pcaps'), uploadBtn, fileIn),
+          h('div', { class: 'panel-head', id: 'pcap-panel-head' },
+            h('h2', null, 'Uploaded pcaps'), newFolderBtn, uploadBtn, fileIn),
           combineBar,
           pcapList,
         ),
@@ -616,7 +624,8 @@ function homeView(app) {
           h('div', { class: 'panel-head' }, h('h2', null, 'Open by server path')),
           h('div', { class: 'path-row' }, pathIn, openBtn),
           h('p', { class: 'dim small' },
-            'Path must be visible to the backend (e.g. a mounted volume). pcap and pcapng are accepted.'),
+            'Path must be visible to the backend (e.g. a mounted volume). pcap and pcapng are accepted, '
+            + 'optionally compressed (.gz .xz .zst .bz2 .lz4 .lz .Z).'),
         ),
       ),
       sessPanel,
@@ -699,34 +708,162 @@ function homeView(app) {
     }
   }
 
-  function renderPcaps(pcaps) {
+  /* ── library folders (flat): fold state per browser, move via drag-and-drop
+     onto a folder header (or the panel header = root) or the row dropdown ── */
+  const foldedFolders = new Set(JSON.parse(localStorage.getItem('avb.pcapFold') || '[]'));
+  function saveFolded() {
+    localStorage.setItem('avb.pcapFold', JSON.stringify([...foldedFolders]));
+  }
+
+  async function movePcap(pid, folder) {
+    try {
+      await api('/api/pcaps/' + encodeURIComponent(pid), { method: 'PUT', json: { folder } });
+      toast(folder ? 'moved to ' + folder : 'moved to the library root');
+      refresh();
+    } catch (err) {
+      toast('move failed: ' + err.message, 'error');
+    }
+  }
+
+  async function newFolder() {
+    const name = window.prompt('New folder name:');
+    if (!name || !name.trim()) return;
+    try {
+      await api('/api/pcaps/folders', { method: 'POST', json: { name: name.trim() } });
+      refresh();
+    } catch (err) {
+      toast('create folder failed: ' + err.message, 'error');
+    }
+  }
+
+  async function deleteFolder(name) {
+    try {
+      await api('/api/pcaps/folders/' + encodeURIComponent(name), { method: 'DELETE' });
+      foldedFolders.delete(name);
+      saveFolded();
+      refresh();
+    } catch (err) {
+      toast('delete folder failed: ' + err.message, 'error');
+    }
+  }
+
+  async function deletePcap(p) {
+    if (!window.confirm('Delete "' + p.name + '" from the library?\n\n'
+        + 'Existing sessions keep their own capture copy and are not affected.')) return;
+    try {
+      await api('/api/pcaps/' + encodeURIComponent(p.id), { method: 'DELETE' });
+      toast('deleted ' + p.name);
+      refresh();
+    } catch (err) {
+      toast('delete failed: ' + err.message, 'error');
+    }
+  }
+
+  function dropTarget(el, folder) {
+    el.addEventListener('dragover', (ev) => { ev.preventDefault(); el.classList.add('is-drop'); });
+    el.addEventListener('dragleave', () => el.classList.remove('is-drop'));
+    el.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      el.classList.remove('is-drop');
+      const pid = ev.dataTransfer.getData('text/pcap-id');
+      if (pid) movePcap(pid, folder);
+    });
+  }
+
+  function pcapRow(p, folders, inFolder) {
+    const btn = h('button', { class: 'btn btn-sm', type: 'button' }, 'Analyze');
+    btn.addEventListener('click', () => analyzePcap(p.id, btn));
+    const chk = h('input', {
+      type: 'checkbox', class: 'prow-chk', checked: selectedPcaps.has(p.id),
+      title: 'select to combine several pcaps into one session',
+    });
+    chk.addEventListener('change', () => {
+      if (chk.checked) selectedPcaps.add(p.id); else selectedPcaps.delete(p.id);
+      updateCombineBar();
+    });
+    const move = h('select', {
+      class: 'input input-sm prow-move', title: 'move this capture to a folder',
+    }, h('option', { value: '' }, '(root)'),
+      folders.map((f) => h('option', { value: f }, f)));
+    move.value = p.folder || '';
+    move.addEventListener('change', () => movePcap(p.id, move.value));
+    const delBtn = role === 'admin' ? h('button', {
+      class: 'btn btn-danger btn-sm', type: 'button',
+      title: 'delete this capture from the library (admin)',
+      onclick: () => deletePcap(p),
+    }, 'Delete') : null;
+    const row = h('div', {
+      class: 'prow' + (inFolder ? ' in-folder' : ''), draggable: 'true',
+      title: 'drag onto a folder to move',
+    },
+      chk,
+      h('span', { class: 'prow-name', title: p.name }, p.name),
+      h('span', { class: 'dim mono small' }, fmtBytes(p.size)),
+      h('span', { class: 'dim small' }, fmtDate(p.uploaded_at)),
+      move,
+      btn,
+      delBtn,
+    );
+    row.addEventListener('dragstart', (ev) => {
+      ev.dataTransfer.setData('text/pcap-id', p.id);
+      ev.dataTransfer.effectAllowed = 'move';
+      row.classList.add('is-dragging');
+    });
+    row.addEventListener('dragend', () => row.classList.remove('is-dragging'));
+    return row;
+  }
+
+  function renderPcaps(pcaps, folders) {
     const live = new Set(pcaps.map((p) => p.id));
     for (const id of [...selectedPcaps]) if (!live.has(id)) selectedPcaps.delete(id);
-    if (!pcaps.length) {
+    /* the panel header doubles as the "move back to root" drop zone */
+    const panelHead = document.getElementById('pcap-panel-head');
+    if (panelHead && !panelHead.dataset.drop) {
+      panelHead.dataset.drop = '1';
+      dropTarget(panelHead, '');
+    }
+    if (!pcaps.length && !folders.length) {
       selectedPcaps.clear();
       updateCombineBar();
       pcapList.replaceChildren(h('div', { class: 'empty' }, 'No pcaps yet — upload one.'));
       return;
     }
-    pcapList.replaceChildren(...pcaps.map((p) => {
-      const btn = h('button', { class: 'btn btn-sm', type: 'button' }, 'Analyze');
-      btn.addEventListener('click', () => analyzePcap(p.id, btn));
-      const chk = h('input', {
-        type: 'checkbox', class: 'prow-chk', checked: selectedPcaps.has(p.id),
-        title: 'select to combine several pcaps into one session',
+    const byFolder = new Map([['', []]]);
+    for (const f of folders) byFolder.set(f, []);
+    for (const p of pcaps) {
+      const key = byFolder.has(p.folder || '') ? (p.folder || '') : '';
+      byFolder.get(key).push(p);
+    }
+    const out = [];
+    for (const p of byFolder.get('')) out.push(pcapRow(p, folders, false));
+    for (const [name, list] of byFolder) {
+      if (name === '') continue;
+      const folded = foldedFolders.has(name);
+      const foldBtn = foldSquare(!folded);
+      const head = h('div', { class: 'pfolder', role: 'button' },
+        foldBtn,
+        h('span', { class: 'pfolder-ico' }, folded ? '📁' : '📂'),
+        h('span', { class: 'pfolder-name' }, name),
+        h('span', { class: 'dim small' },
+          list.length + (list.length === 1 ? ' capture' : ' captures')),
+        h('span', { class: 'toolbar-spacer' }),
+        !list.length ? h('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button',
+          title: 'delete this empty folder',
+          onclick: (ev) => { ev.stopPropagation(); deleteFolder(name); },
+        }, '✕') : null);
+      head.addEventListener('click', (ev) => {
+        if (ev.target.closest('button') && !ev.target.closest('.sm-fold')) return;
+        if (foldedFolders.has(name)) foldedFolders.delete(name);
+        else foldedFolders.add(name);
+        saveFolded();
+        renderPcaps(pcaps, folders);
       });
-      chk.addEventListener('change', () => {
-        if (chk.checked) selectedPcaps.add(p.id); else selectedPcaps.delete(p.id);
-        updateCombineBar();
-      });
-      return h('div', { class: 'prow' },
-        chk,
-        h('span', { class: 'prow-name', title: p.name }, p.name),
-        h('span', { class: 'dim mono small' }, fmtBytes(p.size)),
-        h('span', { class: 'dim small' }, fmtDate(p.uploaded_at)),
-        btn,
-      );
-    }));
+      dropTarget(head, name);
+      out.push(head);
+      if (!folded) for (const p of list) out.push(pcapRow(p, folders, true));
+    }
+    pcapList.replaceChildren(...out);
     updateCombineBar();
   }
 
@@ -771,8 +908,9 @@ function homeView(app) {
     if (!alive) return;
     let anyRunning = false;
     let anyErr = null;
-    if (results[0].status === 'fulfilled') renderPcaps(results[0].value.pcaps || []);
-    else anyErr = results[0].reason;
+    if (results[0].status === 'fulfilled') {
+      renderPcaps(results[0].value.pcaps || [], results[0].value.folders || []);
+    } else anyErr = results[0].reason;
     if (results[1].status === 'fulfilled') {
       const sessions = results[1].value.sessions || [];
       renderSessions(sessions);
@@ -1828,15 +1966,64 @@ function adminView(app) {
     apHead,
     presBox,
   );
+
+  /* ── storage: where the pcap library lives on the backend host ── */
+  const rootIn = h('input', {
+    class: 'input mono', spellcheck: 'false',
+    placeholder: '/var/lib/avb-introspection/pcaps',
+  });
+  const rootApply = h('button', {
+    class: 'btn btn-primary btn-sm', type: 'button', onclick: applyPcapRoot,
+  }, 'Apply');
+  const storageInfo = h('p', { class: 'dim small mono', id: 'storage-info' }, 'loading…');
+  const storagePanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Storage')),
+    h('p', { class: 'dim small' },
+      'Root folder where the uploaded pcap library is stored on the backend host. '
+      + 'Changing it migrates the existing files (copy, then delete). The path must be '
+      + 'writable by the service — for the systemd deployment add it to ReadWritePaths. '
+      + 'Leave empty to reset to the default.'),
+    h('div', { class: 'path-row' }, rootIn, rootApply),
+    storageInfo,
+  );
+
+  async function loadStorage() {
+    try {
+      const s = await api('/api/admin/storage');
+      rootIn.value = s.pcap_root === s.default_root ? '' : (s.pcap_root || '');
+      storageInfo.textContent = 'current: ' + s.pcap_root
+        + (s.pcap_root === s.default_root ? ' (default)' : '')
+        + ' · ' + s.pcap_count + ' stored capture' + (s.pcap_count === 1 ? '' : 's');
+    } catch (err) {
+      storageInfo.textContent = 'storage info unavailable: ' + err.message;
+    }
+  }
+
+  async function applyPcapRoot() {
+    rootApply.disabled = true;
+    try {
+      const r = await api('/api/admin/storage',
+        { method: 'PUT', json: { pcap_root: rootIn.value.trim() } });
+      toast('pcap library now stored in ' + r.pcap_root);
+      loadStorage();
+    } catch (err) {
+      toast('storage: ' + err.message, 'error');
+    } finally {
+      rootApply.disabled = false;
+    }
+  }
+
   app.appendChild(
     h('div', { class: 'home admin' },
       metricsBox,
       auPanel,
       apPanel,
+      storagePanel,
     ),
   );
   makeColsResizable(auHead, auPanel, '--aucols', 'admin-users');
   makeColsResizable(apHead, apPanel, '--apcols', 'admin-presence');
+  loadStorage();
 
   async function createUser(ev) {
     ev.preventDefault();

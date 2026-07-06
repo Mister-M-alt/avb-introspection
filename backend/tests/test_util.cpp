@@ -6,7 +6,12 @@
 #include "test.h"
 #include "util/bytes.h"
 #include "util/crypto_util.h"
+#include "util/decompress.h"
 #include "util/json.h"
+
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 
 using namespace avb;
 
@@ -84,4 +89,48 @@ TEST(json_numeric_field_heuristic) {
     CHECK(w.str().find("\"sequence_id\":7") != std::string::npos);
     CHECK(w.str().find("\"status\":\"SUCCESS\"") != std::string::npos);
     CHECK(w.str().find("\"weird\":\"007\"") != std::string::npos);
+}
+
+TEST(compression_magic_detection) {
+    const unsigned char gz[] = {0x1f, 0x8b, 0x08, 0x00};
+    const unsigned char xz[] = {0xfd, '7', 'z', 'X', 'Z', 0x00};
+    const unsigned char zst[] = {0x28, 0xb5, 0x2f, 0xfd};
+    const unsigned char bz[] = {'B', 'Z', 'h', '9'};
+    const unsigned char lz4[] = {0x04, 0x22, 0x4d, 0x18};
+    const unsigned char pcap[] = {0xd4, 0xc3, 0xb2, 0xa1};
+    const unsigned char pcapng[] = {0x0a, 0x0d, 0x0d, 0x0a};
+    CHECK_EQ(compressionTool(gz, sizeof gz), std::string("gzip"));
+    CHECK_EQ(compressionTool(xz, sizeof xz), std::string("xz"));
+    CHECK_EQ(compressionTool(zst, sizeof zst), std::string("zstd"));
+    CHECK_EQ(compressionTool(bz, sizeof bz), std::string("bzip2"));
+    CHECK_EQ(compressionTool(lz4, sizeof lz4), std::string("lz4"));
+    CHECK_EQ(compressionTool(pcap, sizeof pcap), std::string());
+    CHECK_EQ(compressionTool(pcapng, sizeof pcapng), std::string());
+    CHECK_EQ(compressionTool(gz, 1), std::string());  // too short to tell
+
+    CHECK_EQ(stripCompressionSuffix("trace.pcap.gz"), std::string("trace.pcap"));
+    CHECK_EQ(stripCompressionSuffix("trace.pcapng.zst"), std::string("trace.pcapng"));
+    CHECK_EQ(stripCompressionSuffix("trace.pcap"), std::string("trace.pcap"));
+}
+
+TEST(decompress_gzip_roundtrip) {
+    // gzip is part of the base system everywhere the backend runs.
+    std::string dir = "build/test-decomp";
+    std::filesystem::create_directories(dir);
+    std::string plain = dir + "/x.txt", gz = dir + "/x.txt.gz",
+                out = dir + "/x.out";
+    {
+        std::ofstream f(plain, std::ios::trunc);
+        f << "hello capture";
+    }
+    CHECK_EQ(std::system(("gzip -kf " + plain).c_str()), 0);
+    std::string err;
+    CHECK(decompressFile("gzip", gz, out, err));
+    std::ifstream f(out);
+    std::string got((std::istreambuf_iterator<char>(f)),
+                    std::istreambuf_iterator<char>());
+    CHECK_EQ(got, std::string("hello capture"));
+    // A missing tool reports a clear error instead of a silent failure.
+    CHECK(!decompressFile("definitely-not-a-real-tool", gz, out, err));
+    CHECK(err.find("not installed") != std::string::npos);
 }

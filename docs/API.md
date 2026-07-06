@@ -73,18 +73,61 @@ Response 201: `{"ok": true}`. 409 when the name exists.
 Response: `{"ok": true}` (revokes the user's tokens). 400 when targeting
 your own account or the last admin.
 
+### GET /api/admin/storage
+
+`{"pcap_root": "/var/lib/avb-introspection/pcaps",
+"default_root": "/var/lib/avb-introspection/pcaps", "pcap_count": 3}`
+
+### PUT /api/admin/storage
+
+Request: `{"pcap_root": "/mnt/captures"}` — absolute path where the pcap
+library is stored; `""` resets to the default (`<data>/pcaps`). Existing
+files are migrated (copy first, delete after). The path must be writable
+by the service (systemd deployments: add it to `ReadWritePaths`).
+Response: `{"ok": true, "pcap_root": "/mnt/captures"}`; 400 with a
+diagnostic when the path is not usable.
+
 ## Pcap management
 
 ### GET /api/pcaps
 
 Response: `{"pcaps": [{"id": "p1", "name": "trace.pcap", "size": 12345,
-"uploaded_at": "2026-07-02T16:00:00Z"}]}`
+"uploaded_at": "2026-07-02T16:00:00Z", "folder": ""}], "folders": ["certs"]}`
+`folder` is the library folder the capture is filed in ("" = root; flat).
+`folders` lists every folder (explicitly created or in use).
 
 ### POST /api/pcaps?name=trace.pcap
 
-Body: raw pcap/pcapng bytes (`application/octet-stream`).
+Body: raw pcap/pcapng bytes (`application/octet-stream`), optionally
+compressed (gzip, xz, zstd, bzip2, lz4, lzip, compress — detected by magic
+bytes and inflated server-side through the matching system tool; the
+stored capture and reported `size` are the decompressed bytes, and a known
+compression suffix is stripped from `name`). `POST /api/sessions` with
+`path` accepts compressed files the same way.
 Response 201: `{"id": "p1", "name": "trace.pcap", "size": 12345}`.
-400 if the file is not a valid pcap/pcapng.
+400 if the file is not a valid pcap/pcapng (after decompression).
+
+### PUT /api/pcaps/{id}
+
+Request: `{"folder": "certs"}` — move the capture into a library folder
+(`""` moves it back to the root; the folder is created if needed).
+Response: `{"ok": true}`.
+
+### DELETE /api/pcaps/{id}
+
+Admin only. Removes the stored file and its metadata. Sessions keep their
+own capture copy, so existing investigations are unaffected.
+Response: `{"ok": true}`; 403 for non-admins, 404 for unknown ids.
+
+### POST /api/pcaps/folders
+
+Request: `{"name": "certs"}` (1-64 chars, no `/`). Idempotent.
+Response 201: `{"ok": true}`.
+
+### DELETE /api/pcaps/folders/{name}
+
+Deletes an **empty** folder (400 while captures are still filed in it).
+Response: `{"ok": true}`.
 
 ## Analysis sessions
 

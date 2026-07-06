@@ -20,6 +20,7 @@
 #include "../net/websocket.h"
 #include "../pcapio/pcap_reader.h"
 #include "../util/crypto_util.h"
+#include "../util/decompress.h"
 #include "../util/json.h"
 
 namespace avb {
@@ -130,6 +131,16 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
     if (p.rfind("/api/admin/", 0) == 0) return handleAdmin(req, user, resp);
     if (p == "/api/pcaps" && m == "GET") return handlePcapsGet(resp);
     if (p == "/api/pcaps" && m == "POST") return handlePcapsPost(req, resp);
+    if (p == "/api/pcaps/folders" && m == "POST") return handleFolderPost(req, resp);
+    if (p.rfind("/api/pcaps/folders/", 0) == 0 && m == "DELETE")
+        return handleFolderDelete(p.substr(sizeof "/api/pcaps/folders/" - 1), resp);
+    if (p.rfind("/api/pcaps/", 0) == 0) {
+        std::string pid = p.substr(sizeof "/api/pcaps/" - 1);
+        if (pid.find('/') == std::string::npos && !pid.empty()) {
+            if (m == "DELETE") return handlePcapDelete(pid, user, resp);
+            if (m == "PUT") return handlePcapMove(req, pid, resp);
+        }
+    }
     if (p == "/api/sessions" && m == "GET") return handleSessionsGet(resp);
     if (p == "/api/sessions" && m == "POST") return handleSessionsPost(req, resp);
     if (p == "/api/metrics" && m == "GET") return handleMetrics(resp);
@@ -193,9 +204,14 @@ void Api::handlePcapsGet(HttpResponse& resp) {
         w.kv("name", p.name);
         w.kv("size", p.size);
         w.kv("uploaded_at", p.uploadedAt);
+        w.kv("folder", p.folder);
         w.endObj();
     }
-    w.endArr().endObj();
+    w.endArr();
+    w.key("folders").beginArr();
+    for (auto& f : mStore.pcapFolders()) w.value(f);
+    w.endArr();
+    w.endObj();
     resp.body = w.take();
 }
 
@@ -204,7 +220,6 @@ void Api::handlePcapsPost(HttpRequest& req, HttpResponse& resp) {
     std::string name = req.queryParam("name");
     if (name.empty()) name = "capture.pcap";
 
-    // Validate before persisting: write to a temp file and parse it.
     std::string tmp = mStore.dataDir() + "/.upload-" +
                       std::to_string(mUploadSeq.fetch_add(1)) + ".tmp";
     {
@@ -212,6 +227,31 @@ void Api::handlePcapsPost(HttpRequest& req, HttpResponse& resp) {
         if (!f) return jsonError(resp, 500, "cannot write temp file");
         f.write(req.body.data(), (std::streamsize)req.body.size());
     }
+
+    // Compressed capture? Inflate through the matching system tool and store
+    // the decompressed bytes — everything downstream sees a plain capture.
+    std::string bytes = std::move(req.body);
+    std::string tool = compressionTool(bytes);
+    if (!tool.empty()) {
+        std::string plain = tmp + ".plain";
+        std::string derr;
+        if (!decompressFile(tool, tmp, plain, derr)) {
+            std::remove(tmp.c_str());
+            return jsonError(resp, 400, derr);
+        }
+        std::ifstream f(plain, std::ios::binary);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        bytes = ss.str();
+        std::remove(tmp.c_str());
+        if (std::rename(plain.c_str(), tmp.c_str()) != 0) {
+            std::remove(plain.c_str());
+            return jsonError(resp, 500, "cannot stage decompressed capture");
+        }
+        name = stripCompressionSuffix(name);
+    }
+
+    // Validate before persisting: parse the (now plain) temp file.
     PcapFile probe;
     std::string perr;
     bool ok = probe.open(tmp, perr);
@@ -219,14 +259,52 @@ void Api::handlePcapsPost(HttpRequest& req, HttpResponse& resp) {
     if (!ok) return jsonError(resp, 400, "not a valid capture: " + perr);
 
     std::string err;
-    std::string id = mStore.addPcap(name, req.body, err);
+    std::string id = mStore.addPcap(name, bytes, err);
     if (id.empty()) return jsonError(resp, 500, err);
 
     resp.status = 201;
     JsonWriter w;
-    w.beginObj().kv("id", id).kv("name", name).kv("size", (uint64_t)req.body.size())
+    w.beginObj().kv("id", id).kv("name", name).kv("size", (uint64_t)bytes.size())
         .endObj();
     resp.body = w.take();
+}
+
+void Api::handlePcapDelete(const std::string& id, const std::string& user,
+                           HttpResponse& resp) {
+    if (mAuth.roleOf(user) != "admin")
+        return jsonError(resp, 403, "admin role required to delete pcaps");
+    std::string err;
+    if (!mStore.removePcap(id, err))
+        return jsonError(resp, err.rfind("no such", 0) == 0 ? 404 : 500, err);
+    resp.body = "{\"ok\":true}";
+}
+
+void Api::handlePcapMove(HttpRequest& req, const std::string& id,
+                         HttpResponse& resp) {
+    JsonValue body = JsonValue::parse(req.body);
+    const JsonValue* f = body.get("folder");
+    if (!f || f->type != JsonValue::Type::String)
+        return jsonError(resp, 400, "body must be {\"folder\": \"...\"} (\"\" = root)");
+    std::string err;
+    if (!mStore.setPcapFolder(id, f->str, err))
+        return jsonError(resp, err.rfind("no such", 0) == 0 ? 404 : 400, err);
+    resp.body = "{\"ok\":true}";
+}
+
+void Api::handleFolderPost(HttpRequest& req, HttpResponse& resp) {
+    JsonValue body = JsonValue::parse(req.body);
+    std::string err;
+    if (!mStore.addPcapFolder(body.getStr("name"), err))
+        return jsonError(resp, 400, err);
+    resp.status = 201;
+    resp.body = "{\"ok\":true}";
+}
+
+void Api::handleFolderDelete(const std::string& name, HttpResponse& resp) {
+    std::string err;
+    if (!mStore.removePcapFolder(name, err))
+        return jsonError(resp, 400, err);
+    resp.body = "{\"ok\":true}";
 }
 
 // -------------------------------------------------------------- sessions -
@@ -281,8 +359,25 @@ void Api::handleSessionsPost(HttpRequest& req, HttpResponse& resp) {
         return jsonError(resp, 400, "body must contain pcap_id, pcap_ids, or path");
     }
 
+    // A compressed server-path capture is inflated to a staging file; the
+    // session copies from there (its own copy stays a plain capture).
+    std::string staged;
+    if (!meta.path.empty()) {
+        std::string tool = compressionToolForFile(meta.path);
+        if (!tool.empty()) {
+            staged = mStore.dataDir() + "/.open-" +
+                     std::to_string(mUploadSeq.fetch_add(1)) + ".tmp";
+            std::string derr;
+            if (!decompressFile(tool, meta.path, staged, derr))
+                return jsonError(resp, 400, derr);
+            meta.resolvedPath = staged;
+            s->name = meta.name = stripCompressionSuffix(meta.name);
+        }
+    }
+
     std::string serr;
     s->id = mStore.addSession(meta, serr);
+    if (!staged.empty()) std::remove(staged.c_str());
     // A failed combine is a user error (overlapping / non-absolute timestamps).
     if (s->id.empty()) return jsonError(resp, combine ? 400 : 500, serr);
     s->createdAt = Store::nowIso8601();
@@ -669,6 +764,30 @@ void Api::handleAdmin(HttpRequest& req, const std::string& user,
                              err);
         resp.status = 201;
         resp.body = "{\"ok\":true}";
+        return;
+    }
+    if (p == "/api/admin/storage" && m == "GET") {
+        JsonWriter w;
+        w.beginObj();
+        w.kv("pcap_root", mStore.pcapRoot());
+        w.kv("default_root", mStore.defaultPcapRoot());
+        w.kv("pcap_count", (uint64_t)mStore.pcaps().size());
+        w.endObj();
+        resp.body = w.take();
+        return;
+    }
+    if (p == "/api/admin/storage" && m == "PUT") {
+        JsonValue body = JsonValue::parse(req.body);
+        const JsonValue* root = body.get("pcap_root");
+        if (!root || root->type != JsonValue::Type::String)
+            return jsonError(resp, 400,
+                             "body must be {\"pcap_root\": \"/abs/path\"} "
+                             "(\"\" resets to the default)");
+        std::string err;
+        if (!mStore.setPcapRoot(root->str, err)) return jsonError(resp, 400, err);
+        JsonWriter w;
+        w.beginObj().kv("ok", true).kv("pcap_root", mStore.pcapRoot()).endObj();
+        resp.body = w.take();
         return;
     }
     const std::string prefix = "/api/admin/users/";

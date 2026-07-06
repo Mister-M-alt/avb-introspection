@@ -27,6 +27,7 @@ public:
     struct PcapMeta {
         std::string id, name, uploadedAt;
         uint64_t size = 0;
+        std::string folder; // library folder ("" = root; flat, no nesting)
     };
     struct SessionMeta {
         std::string id, name, pcapId, path, createdAt;
@@ -35,6 +36,10 @@ public:
         // each with a user-editable display alias (parallel to pcapIds).
         std::vector<std::string> pcapIds;
         std::vector<std::string> pcapAliases;
+        // Transient (never persisted): when the API pre-processed the source
+        // (e.g. decompressed a compressed capture), copy from here while
+        // `path` keeps recording the user-visible origin.
+        std::string resolvedPath;
     };
     struct SessionSource {
         std::string pcapId, name, alias;
@@ -52,6 +57,22 @@ public:
     bool hasPcap(const std::string& id) const;
     std::string pcapPath(const std::string& id) const;
     std::string pcapName(const std::string& id) const;
+    /** Delete a stored pcap (file + metadata). Sessions keep their own copy. */
+    bool removePcap(const std::string& id, std::string& err);
+
+    /** Library folders (flat). A folder exists explicitly (addPcapFolder) or
+     *  implicitly while a pcap is filed in it. */
+    std::vector<std::string> pcapFolders() const;
+    bool addPcapFolder(const std::string& name, std::string& err);
+    bool removePcapFolder(const std::string& name, std::string& err); // empty only
+    bool setPcapFolder(const std::string& id, const std::string& folder,
+                       std::string& err); // "" moves back to the root
+
+    /** Directory holding the library pcap files. Configurable by the admin;
+     *  defaults to <data>/pcaps. Changing it migrates the stored files. */
+    std::string pcapRoot() const;
+    std::string defaultPcapRoot() const { return mDataDir + "/pcaps"; }
+    bool setPcapRoot(const std::string& path, std::string& err);
 
     /**
      * Create the session folder: assigns the id, copies the source capture
@@ -92,12 +113,21 @@ private:
 
     bool saveDeviceNames(std::string& err);
 
+    std::string pcapRootLocked() const {
+        return mPcapRoot.empty() ? mDataDir + "/pcaps" : mPcapRoot;
+    }
+    std::string pcapPathLocked(const std::string& id) const {
+        return pcapRootLocked() + "/" + id + ".pcap";
+    }
+
     std::string mDataDir;
     mutable std::mutex mMu;
     uint64_t mNextPcap = 1, mNextSession = 1;
     std::vector<PcapMeta> mPcaps;
     std::vector<SessionMeta> mSessions;
     std::map<std::string, std::string> mDeviceNames;
+    std::vector<std::string> mPcapFolders; // explicitly created folders
+    std::string mPcapRoot;                 // "" = default <data>/pcaps
 };
 
 } // namespace avb

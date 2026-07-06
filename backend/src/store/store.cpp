@@ -6,6 +6,7 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -65,15 +66,27 @@ bool Store::init(const std::string& dataDir, std::string& err) {
     }
     mNextPcap = (uint64_t)root.getNum("next_pcap", 1);
     mNextSession = (uint64_t)root.getNum("next_session", 1);
+    mPcapRoot = root.getStr("pcap_root");
+    if (!mPcapRoot.empty()) {
+        // The configured root must exist (e.g. an unmounted volume after a
+        // reboot) — otherwise fall back to the default so the app still runs.
+        std::error_code ec;
+        std::filesystem::create_directories(mPcapRoot, ec);
+        if (ec) mPcapRoot.clear();
+    }
+    if (auto* arr = root.get("pcap_folders"); arr)
+        for (auto& v : arr->arr)
+            if (!v.str.empty()) mPcapFolders.push_back(v.str);
     if (auto* arr = root.get("pcaps"); arr)
         for (auto& p : arr->arr)
             mPcaps.push_back({p.getStr("id"), p.getStr("name"),
                               p.getStr("uploaded_at"),
-                              (uint64_t)p.getNum("size")});
+                              (uint64_t)p.getNum("size"),
+                              p.getStr("folder")});
     if (auto* arr = root.get("sessions"); arr)
         for (auto& s : arr->arr) {
             SessionMeta sm{s.getStr("id"), s.getStr("name"), s.getStr("pcap_id"),
-                           s.getStr("path"), s.getStr("created_at"), {}, {}};
+                           s.getStr("path"), s.getStr("created_at"), {}, {}, {}};
             if (auto* ids = s.get("pcap_ids"); ids)
                 for (auto& v : ids->arr) sm.pcapIds.push_back(v.str);
             if (auto* al = s.get("pcap_aliases"); al)
@@ -89,6 +102,12 @@ bool Store::save(std::string& err) {
     w.beginObj();
     w.kv("next_pcap", mNextPcap);
     w.kv("next_session", mNextSession);
+    if (!mPcapRoot.empty()) w.kv("pcap_root", mPcapRoot);
+    if (!mPcapFolders.empty()) {
+        w.key("pcap_folders").beginArr();
+        for (auto& f : mPcapFolders) w.value(f);
+        w.endArr();
+    }
     w.key("pcaps").beginArr();
     for (auto& p : mPcaps) {
         w.beginObj();
@@ -96,6 +115,7 @@ bool Store::save(std::string& err) {
         w.kv("name", p.name);
         w.kv("uploaded_at", p.uploadedAt);
         w.kv("size", p.size);
+        if (!p.folder.empty()) w.kv("folder", p.folder);
         w.endObj();
     }
     w.endArr();
@@ -141,7 +161,7 @@ std::string Store::addPcap(const std::string& name, const std::string& bytes,
                            std::string& err) {
     std::lock_guard lk(mMu);
     std::string id = "p" + std::to_string(mNextPcap);
-    std::string path = mDataDir + "/pcaps/" + id + ".pcap";
+    std::string path = pcapPathLocked(id);
     {
         std::ofstream f(path, std::ios::binary | std::ios::trunc);
         if (!f) {
@@ -155,13 +175,166 @@ std::string Store::addPcap(const std::string& name, const std::string& bytes,
         }
     }
     mNextPcap++;
-    mPcaps.push_back({id, name, nowIso8601(), bytes.size()});
+    mPcaps.push_back({id, name, nowIso8601(), bytes.size(), ""});
     if (!save(err)) {
         std::remove(path.c_str());
         mPcaps.pop_back();
         return "";
     }
     return id;
+}
+
+bool Store::removePcap(const std::string& id, std::string& err) {
+    std::lock_guard lk(mMu);
+    auto it = std::find_if(mPcaps.begin(), mPcaps.end(),
+                           [&](const PcapMeta& p) { return p.id == id; });
+    if (it == mPcaps.end()) {
+        err = "no such pcap " + id;
+        return false;
+    }
+    mPcaps.erase(it);
+    if (!save(err)) return false;
+    // Sessions are self-contained (own capture copy) — deleting the library
+    // file never breaks an existing investigation.
+    std::remove(pcapPathLocked(id).c_str());
+    return true;
+}
+
+// -------------------------------------------------------- library folders -
+
+namespace {
+bool validFolderName(const std::string& name) {
+    if (name.empty() || name.size() > 64 || name[0] == '.') return false;
+    for (char c : name)
+        if (c == '/' || c == '\\' || (unsigned char)c < 0x20) return false;
+    return true;
+}
+} // namespace
+
+std::vector<std::string> Store::pcapFolders() const {
+    std::lock_guard lk(mMu);
+    std::vector<std::string> out = mPcapFolders;
+    for (auto& p : mPcaps)
+        if (!p.folder.empty() &&
+            std::find(out.begin(), out.end(), p.folder) == out.end())
+            out.push_back(p.folder);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool Store::addPcapFolder(const std::string& name, std::string& err) {
+    if (!validFolderName(name)) {
+        err = "folder name must be 1-64 chars without '/'";
+        return false;
+    }
+    std::lock_guard lk(mMu);
+    if (std::find(mPcapFolders.begin(), mPcapFolders.end(), name) !=
+        mPcapFolders.end())
+        return true; // already exists — idempotent
+    mPcapFolders.push_back(name);
+    std::sort(mPcapFolders.begin(), mPcapFolders.end());
+    return save(err);
+}
+
+bool Store::removePcapFolder(const std::string& name, std::string& err) {
+    std::lock_guard lk(mMu);
+    for (auto& p : mPcaps)
+        if (p.folder == name) {
+            err = "folder still contains captures — move them out first";
+            return false;
+        }
+    std::erase(mPcapFolders, name);
+    return save(err);
+}
+
+bool Store::setPcapFolder(const std::string& id, const std::string& folder,
+                          std::string& err) {
+    if (!folder.empty() && !validFolderName(folder)) {
+        err = "folder name must be 1-64 chars without '/'";
+        return false;
+    }
+    std::lock_guard lk(mMu);
+    for (auto& p : mPcaps) {
+        if (p.id != id) continue;
+        p.folder = folder;
+        // Moving into a new name creates the folder implicitly; make it
+        // explicit so it survives moving the pcap back out.
+        if (!folder.empty() &&
+            std::find(mPcapFolders.begin(), mPcapFolders.end(), folder) ==
+                mPcapFolders.end()) {
+            mPcapFolders.push_back(folder);
+            std::sort(mPcapFolders.begin(), mPcapFolders.end());
+        }
+        return save(err);
+    }
+    err = "no such pcap " + id;
+    return false;
+}
+
+// ------------------------------------------------------------- pcap root -
+
+std::string Store::pcapRoot() const {
+    std::lock_guard lk(mMu);
+    return pcapRootLocked();
+}
+
+bool Store::setPcapRoot(const std::string& path, std::string& err) {
+    std::lock_guard lk(mMu);
+    std::string next = path;
+    while (next.size() > 1 && next.back() == '/') next.pop_back();
+    if (next.empty()) next = mDataDir + "/pcaps"; // reset to the default
+    if (next[0] != '/') {
+        err = "pcap root must be an absolute path";
+        return false;
+    }
+    std::string cur = pcapRootLocked();
+    if (next == cur) return true;
+
+    std::error_code ec;
+    std::filesystem::create_directories(next, ec);
+    if (ec) {
+        err = "cannot create " + next + ": " + ec.message() +
+              " (is the path writable by the service? see ReadWritePaths in "
+              "the systemd unit)";
+        return false;
+    }
+    // Writability probe — a clear error beats ofstream failures later.
+    {
+        std::string probe = next + "/.avb-write-test";
+        std::ofstream f(probe, std::ios::trunc);
+        if (!f) {
+            err = next + " is not writable by the service (see ReadWritePaths "
+                  "in the systemd unit)";
+            return false;
+        }
+        f.close();
+        std::remove(probe.c_str());
+    }
+    // Copy-first migration: only after every file arrived do we switch the
+    // root and delete the originals, so a failure never strands the library.
+    std::vector<std::string> copied;
+    for (auto& p : mPcaps) {
+        std::string from = cur + "/" + p.id + ".pcap";
+        std::string to = next + "/" + p.id + ".pcap";
+        std::filesystem::copy_file(
+            from, to, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            for (auto& c : copied) std::remove(c.c_str());
+            err = "cannot move " + p.id + ".pcap to " + next + ": " +
+                  ec.message();
+            return false;
+        }
+        copied.push_back(to);
+    }
+    std::string prev = mPcapRoot;
+    mPcapRoot = (next == mDataDir + "/pcaps") ? "" : next;
+    if (!save(err)) {
+        mPcapRoot = prev;
+        for (auto& c : copied) std::remove(c.c_str());
+        return false;
+    }
+    for (auto& p : mPcaps) std::remove((cur + "/" + p.id + ".pcap").c_str());
+    return true;
 }
 
 std::vector<Store::PcapMeta> Store::pcaps() const {
@@ -177,7 +350,8 @@ bool Store::hasPcap(const std::string& id) const {
 }
 
 std::string Store::pcapPath(const std::string& id) const {
-    return mDataDir + "/pcaps/" + id + ".pcap";
+    std::lock_guard lk(mMu);
+    return pcapPathLocked(id);
 }
 
 std::string Store::pcapName(const std::string& id) const {
@@ -252,17 +426,18 @@ std::string Store::addSession(SessionMeta meta, std::string& err) {
     std::vector<std::string> srcPaths, srcNames;
     if (!meta.pcapIds.empty()) {
         for (auto& pid : meta.pcapIds) {
-            srcPaths.push_back(pcapPath(pid));
+            srcPaths.push_back(pcapPathLocked(pid));
             srcNames.push_back(nameOf(pid));
         }
         if (meta.pcapId.empty()) meta.pcapId = meta.pcapIds.front();
         // Default alias for each source is its capture name; user-editable.
         meta.pcapAliases = srcNames;
     } else if (!meta.pcapId.empty()) {
-        srcPaths.push_back(pcapPath(meta.pcapId));
+        srcPaths.push_back(pcapPathLocked(meta.pcapId));
         srcNames.push_back(nameOf(meta.pcapId));
     } else {
-        srcPaths.push_back(meta.path);
+        srcPaths.push_back(meta.resolvedPath.empty() ? meta.path
+                                                     : meta.resolvedPath);
         srcNames.push_back(meta.name);
     }
 

@@ -41,6 +41,11 @@ private:
     void handleLogin(HttpRequest&, HttpResponse&);
     void handlePcapsGet(HttpResponse&);
     void handlePcapsPost(HttpRequest&, HttpResponse&);
+    void handlePcapDelete(const std::string& id, const std::string& user,
+                          HttpResponse&);
+    void handlePcapMove(HttpRequest&, const std::string& id, HttpResponse&);
+    void handleFolderPost(HttpRequest&, HttpResponse&);
+    void handleFolderDelete(const std::string& name, HttpResponse&);
     void handleSessionsGet(HttpResponse&);
     void handleSessionsPost(HttpRequest&, HttpResponse&);
     void handleSessionGet(const std::string& id, HttpResponse&);

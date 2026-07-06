@@ -38,6 +38,11 @@ Restart=on-failure
 RestartSec=2
 
 # Hardening — the daemon only needs its data directory.
+# If an admin points the pcap library at a path outside the data dir
+# (Admin → Storage), add that path here too, e.g.:
+#   ReadWritePaths=/var/lib/avb-introspection /mnt/captures
+# otherwise ProtectSystem=strict makes the new root read-only and the change
+# is rejected with a "not writable by the service" error.
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/avb-introspection
