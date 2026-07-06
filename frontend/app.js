@@ -1339,6 +1339,67 @@ const ACMP_MACHINE = {
     + 'every probing/settled state.',
 };
 
+/* IEEE 1722.1 ACMP connection — one talker↔listener stream binding,
+   reconstructed from the CONNECT/DISCONNECT command↔response flow (plus
+   timeouts). Node ids match connections[].state / history verbatim. */
+const ACMP_CONNECTION_MACHINE = {
+  title: 'ACMP Connection',
+  subtitle: 'IEEE 1722.1 §8.2 — CONNECT / DISCONNECT flow per talker↔listener stream',
+  svgId: 'machine-acmp-conn', accent: PROTO_COLORS.ACMP,
+  view: { x: 0, y: -20, w: 772, h: 390 }, minW: 620,
+  states: [
+    { id: 'FAILED', x: 300, y: 10, sub: 'error / timeout' },
+    { id: 'DISCONNECTED', x: 40, y: 150, sub: 'no stream' },
+    { id: 'CONNECTING', x: 300, y: 150, sub: 'await response' },
+    { id: 'CONNECTED', x: 560, y: 150, sub: 'stream bound' },
+    { id: 'DISCONNECTING', x: 430, y: 285, sub: 'await response' },
+  ],
+  edges: [
+    { from: 'DISCONNECTED', to: 'CONNECTING', fromSide: 'R', fromT: 0.4, toSide: 'L', toT: 0.4,
+      label: ['CONNECT_TX/RX', 'COMMAND'], labelAt: { x: 246, y: 136 } },
+    { from: 'CONNECTING', to: 'CONNECTED', fromSide: 'R', fromT: 0.4, toSide: 'L', toT: 0.4,
+      label: ['CONNECT_RX_RESP', 'SUCCESS'], labelAt: { x: 506, y: 136 } },
+    { from: 'CONNECTING', to: 'FAILED', fromSide: 'T', fromT: 0.35, toSide: 'B', toT: 0.35,
+      label: ['error status', '/ timeout'], labelAt: { x: 296, y: 103 } },
+    { from: 'FAILED', to: 'CONNECTING', fromSide: 'B', fromT: 0.65, toSide: 'T', toT: 0.65,
+      label: ['new CONNECT', 'COMMAND'], labelAt: { x: 462, y: 103 } },
+    { from: 'FAILED', to: 'DISCONNECTING', fromSide: 'R', fromT: 0.5,
+      via: [{ x: 745, y: 33 }, { x: 745, y: 308 }], toSide: 'R', toT: 0.5,
+      label: ['DISCONNECT', 'COMMAND'], labelAt: { x: 682, y: 62 } },
+    { from: 'CONNECTED', to: 'DISCONNECTING', fromSide: 'B', fromT: 0.35, toSide: 'T', toT: 0.55,
+      label: ['DISCONNECT_TX/RX', 'COMMAND'], labelAt: { x: 653, y: 247 } },
+    { from: 'DISCONNECTING', to: 'CONNECTED', fromSide: 'T', fromT: 0.9, toSide: 'B', toT: 0.75, curve: -12,
+      label: 'rejected', labelAt: { x: 620, y: 285 } },
+    { from: 'DISCONNECTING', to: 'DISCONNECTED', fromSide: 'L', fromT: 0.5, toSide: 'B', toT: 0.5,
+      via: [{ x: 116, y: 308 }],
+      label: ['RESPONSE SUCCESS', '/ timeout'], labelAt: { x: 268, y: 320 } },
+  ],
+  note: 'Reconstructed from the tap: a command opens the transition, the matching '
+    + 'response (or its 200 ms/4.5 s ACMP timeout) settles it. GET_TX/RX_STATE '
+    + 'and GET_TX_CONNECTION are observational and do not move this machine.',
+};
+
+/* Milan talker — deliberately stateless (§5.5.4): it must answer every
+   PROBE_TX / DISCONNECT_TX immediately, holding no per-listener state. The
+   single node + self-loop makes that spec property visible; the loop's
+   triggers list every observed response. */
+const MILAN_TALKER_MACHINE = {
+  title: 'ACMP Talker Source',
+  subtitle: 'Milan v1.2 §5.5.4 — stateless: every PROBE_TX / DISCONNECT_TX gets an immediate response',
+  svgId: 'machine-acmp-talker', accent: PROTO_COLORS.ACMP,
+  view: { x: 60, y: -78, w: 620, h: 200 }, minW: 420,
+  states: [
+    { id: 'STATELESS', x: 294, y: 50, sub: 'always responds' },
+  ],
+  edges: [
+    { from: 'STATELESS', to: 'STATELESS',
+      label: ['PROBE_TX / DISCONNECT_TX rx', '→ RESPONSE (always SUCCESS)'], labelAt: { x: 370, y: -14 } },
+  ],
+  note: 'A Milan talker keeps no binding state — listeners own the bindings '
+    + '(see the ACMP Listener Sink machine). The stream itself is allocated at '
+    + 'PROBE_TX_RESPONSE time; SRP carries its reservation.',
+};
+
 const ADP_ENTITY_MACHINE = {
   title: 'ADP Entity Lifecycle',
   subtitle: 'Observer reconstruction — ADP ENTITY_AVAILABLE / ENTITY_DEPARTING / valid_time',
@@ -3126,6 +3187,21 @@ function sessionView(app, id) {
     r.fullHistory = en.history || [];
     return r;
   }
+  function connLive(c, T) {
+    if (!c) return { current: null, history: [], visited: new Set() };
+    const r = liveAtN(c.history, c.state || 'DISCONNECTED', T == null ? curTs() : T);
+    r.fullHistory = c.history || [];
+    return r;
+  }
+  /* Milan talkers are stateless — the overlay only animates the self-loop
+     (its clickable triggers list every observed response) */
+  function talkerLive(t, T) {
+    const r = liveAtN(t.history, 'STATELESS', T == null ? curTs() : T);
+    r.current = 'STATELESS';
+    r.visited.add('STATELESS');
+    r.fullHistory = t.history || [];
+    return r;
+  }
   function advertiseLive(en, T) {
     const cur = entityLive(en, T).current === 'AVAILABLE' ? 'WAITING' : null;
     return { current: cur, history: [], visited: new Set(cur ? [cur] : []) };
@@ -3228,7 +3304,8 @@ function sessionView(app, id) {
         n = {
           mac: key, entity_id: '', entity_name: '', name: '', label: key,
           assocIds: [], protocols: [], packets: 0, ports: [], entity: null,
-          milanSinks: [], talkerSinks: [], mrp: [], roles: new Set(),
+          milanSinks: [], talkerSinks: [], milanTalkers: [], connections: [],
+          mrp: [], roles: new Set(),
           clockIds: new Set(), synthetic: false,
         };
         devices.set(key, n);
@@ -3317,12 +3394,26 @@ function sessionView(app, id) {
       }
     }
     for (const t of st.milan_talkers || []) {
-      for (const mac of macsFor(t.talker_entity)) { const n = devices.get(mac); if (n) n.roles.add('Talker'); }
+      for (const mac of macsFor(t.talker_entity)) {
+        const n = devices.get(mac);
+        if (n) { n.milanTalkers.push(t); n.roles.add('Talker'); }
+      }
     }
     for (const c of st.connections || []) {
       if (!isZeroId(c.talker_entity)) for (const m of macsFor(c.talker_entity)) devices.get(m).roles.add('Talker');
       if (!isZeroId(c.listener_entity)) for (const m of macsFor(c.listener_entity)) devices.get(m).roles.add('Listener');
       if (!isZeroId(c.controller_entity)) for (const m of macsFor(c.controller_entity)) devices.get(m).roles.add('Controller');
+      /* the connection machine renders on both stream endpoints — skip
+         never-transitioned placeholder rows (e.g. from a lone GET_TX_STATE) */
+      if ((!c.history || !c.history.length)
+          && (c.state || 'DISCONNECTED') === 'DISCONNECTED') continue;
+      const attached = new Set();
+      for (const m of macsFor(c.talker_entity).concat(macsFor(c.listener_entity))) {
+        if (attached.has(m)) continue;
+        attached.add(m);
+        const n = devices.get(m);
+        if (n) n.connections.push(c);
+      }
     }
     for (const r of st.reservations || []) {
       const tn = ensure(r.talker_mac);
@@ -3705,6 +3796,10 @@ function sessionView(app, id) {
     return foldableCard(card, 'dev-aecp-' + i);
   }
 
+  function kvBadge(k, badge) {
+    return h('span', { class: 'kv' }, h('span', { class: 'kv-k' }, k + ' '), badge);
+  }
+
   /* ENTITY_ID(NAME):STREAM_UNIQUE_ID for the talker source and listener sink,
      plus the StreamID — shown in the card header so it stays visible folded */
   function acmpEpsBlock(s) {
@@ -3753,6 +3848,51 @@ function sessionView(app, id) {
       adp.push(machineCard(Object.assign({}, ADP_DISCOVERY_MACHINE,
         { svgId: i === 0 ? 'topo-machine-adp-discovery' : 'topo-machine-adp-discovery-' + i }),
         discoveryLive(s), null));
+    });
+    /* this device's talker sources: the Milan stateless-talker card, with
+       probe/response counters and the SRP declaration state */
+    (n.milanTalkers || []).forEach((t, i) => {
+      const def = Object.assign({}, MILAN_TALKER_MACHINE, { svgId: 'topo-machine-acmp-talker-' + i });
+      const card = machineCard(def, talkerLive(t), null);
+      const head = card.querySelector('.machine-head');
+      if (head) {
+        head.appendChild(h('div', { class: 'acmp-eps' },
+          h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Talker '),
+            acmpEndpoint(t.talker_entity, t.talker_unique_id)),
+          (t.stream_id && !isZeroId(t.stream_id))
+            ? h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'StreamID '),
+                h('span', { class: 'mono acmp-ep-id' }, t.stream_id)) : null));
+        head.appendChild(h('div', { class: 'topo-badges' },
+          h('span', { class: 'kv' }, h('span', { class: 'kv-k' }, 'probes '),
+            h('span', { class: 'mono' }, String(t.probes_received || 0))),
+          h('span', { class: 'kv' }, h('span', { class: 'kv-k' }, 'responses '),
+            h('span', { class: 'mono' }, String(t.probe_responses || 0))),
+          t.disconnect_tx_seen ? h('span', { class: 'kv' }, h('span', { class: 'kv-k' }, 'disconnects '),
+            h('span', { class: 'mono' }, String(t.disconnect_tx_seen))) : null,
+          t.last_status ? kvBadge('last status', stateBadge(t.last_status, true)) : null,
+          t.srp_declaration && t.srp_declaration !== 'NONE'
+            ? kvBadge('SRP', stateBadge(t.srp_declaration, true)) : null));
+      }
+      acmp.push(card);
+    });
+    /* the IEEE 1722.1 connection machine for each stream this device is an
+       endpoint of (talker or listener side) */
+    (n.connections || []).forEach((c, i) => {
+      const def = Object.assign({}, ACMP_CONNECTION_MACHINE, { svgId: 'topo-machine-acmp-conn-' + i });
+      const card = machineCard(def, connLive(c), null);
+      const head = card.querySelector('.machine-head');
+      if (head) head.appendChild(h('div', { class: 'acmp-eps' },
+        h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Talker '),
+          acmpEndpoint(c.talker_entity, c.talker_unique_id)),
+        h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Listener '),
+          acmpEndpoint(c.listener_entity, c.listener_unique_id)),
+        (c.controller_entity && !isZeroId(c.controller_entity))
+          ? h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Controller '),
+              entityLabel(c.controller_entity)) : null,
+        (c.stream_id && !isZeroId(c.stream_id))
+          ? h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'StreamID '),
+              h('span', { class: 'mono acmp-ep-id' }, c.stream_id)) : null));
+      acmp.push(card);
     });
     /* sink machines of streams this device TALKS into (the machine itself
        lives in the remote listener — Milan talkers are stateless) */
