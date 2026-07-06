@@ -774,6 +774,13 @@ void Api::handleInfo(const std::string& id, HttpResponse& resp) {
                 if (dev.protoMask & (1u << p)) w.value(protoName((Proto)p));
             w.endArr();
             w.kv("entity_id", dev.entityId ? idStr(dev.entityId) : "");
+            // Secondary entity ids proven to originate from this MAC —
+            // lets the frontend attach controller/listener state (ACMP,
+            // AECP) to devices that never advertise via ADP.
+            w.key("assoc_entity_ids").beginArr();
+            for (uint64_t aid : dev.assocIds)
+                if (aid != dev.entityId) w.value(idStr(aid));
+            w.endArr();
             std::string autoName;
             if (dev.entityId && s->logic)
                 autoName = s->logic->shared.nameOf(dev.entityId);

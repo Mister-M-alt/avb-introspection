@@ -150,6 +150,27 @@ void Engine::analyze(std::shared_ptr<Session> sp) {
                     dev.entityId = ctx.at("entity_id");
                 else if (d.proto == Proto::AECP && ctx.at("message_type") == 1)
                     dev.entityId = ctx.at("target_entity_id");
+                if (dev.entityId) dev.assocIds.insert(dev.entityId);
+                // Controllers never advertise via ADP, but AECP commands name
+                // the controller entity that sent them.
+                if (d.proto == Proto::AECP && ctx.at("message_type") == 0) {
+                    if (uint64_t c = ctx.at("controller_entity_id"))
+                        dev.assocIds.insert(c);
+                }
+                // ACMP: IEEE 1722.1 fixes which role sends each message type,
+                // so the src MAC pins that role's entity id.
+                if (d.proto == Proto::ACMP) {
+                    uint64_t id = 0;
+                    switch (ctx.at("message_type")) {
+                    case 0: case 2: case 7: case 9: case 11:  // listener sends
+                        id = ctx.at("listener_entity_id"); break;
+                    case 1: case 3: case 5: case 13:          // talker sends
+                        id = ctx.at("talker_entity_id"); break;
+                    case 4: case 6: case 8: case 10: case 12: // controller sends
+                        id = ctx.at("controller_entity_id"); break;
+                    }
+                    if (id) dev.assocIds.insert(id);
+                }
             }
         }
 

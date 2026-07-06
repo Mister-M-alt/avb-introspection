@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -82,6 +83,11 @@ struct Session {
         uint64_t packets = 0;
         uint32_t protoMask = 0;  // bit i = (Proto)i seen from this source
         uint64_t entityId = 0;   // ATDECC entity associated via ADP/AECP
+        // Every entity id proven to originate from this MAC (controller ids in
+        // AECP/ACMP commands, talker/listener ids in ACMP responses, ...).
+        // Controllers such as certification test machines never send ADP
+        // ENTITY_AVAILABLE, so this is how their state gets attached to them.
+        std::set<uint64_t> assocIds;
     };
     std::map<uint64_t, DeviceInfo> devices;
 
