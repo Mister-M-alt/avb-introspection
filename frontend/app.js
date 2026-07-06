@@ -1482,6 +1482,29 @@ function drawMachine(container, def, live) {
     gEdges.appendChild(el);
     paths.push({ e, pf, st, el, triggers });
   }
+  /* Observed transitions the spec diagram has no edge for — e.g. a capture that
+     starts mid-state jumps UNKNOWN → ACQUIRED (a MAAP_ANNOUNCE with no probe
+     seen). Draw them as dashed "observed" edges so the transition, and the
+     packet/event that drove it, are still shown and clickable. */
+  if (!def.reference) {
+    const defined = new Set(def.edges.map((e) => String(e.from) + '>' + String(e.to)));
+    for (const [key, triggers] of edgeTriggers) {
+      if (defined.has(key)) continue;
+      const gt = key.indexOf('>');
+      const from = key.slice(0, gt), to = key.slice(gt + 1);
+      if (from === to || !nodeById.has(from) || !nodeById.has(to)) continue;
+      const e = { from, to, curve: 52, observed: true };   /* bow clear of any state between */
+      const pf = pathFor(e);
+      if (!pf) continue;
+      const st = edgeState(e);
+      const el = svg('path', {
+        class: 'sm-edge sm-edge-obs ' + st + ' is-clickable', d: pf.d,
+        'marker-end': 'url(#' + (st === 'is-dim' ? mkDim : mkAcc) + ')',
+      });
+      gEdges.appendChild(el);
+      paths.push({ e, pf, st, el, triggers });
+    }
+  }
 
   /* nodes */
   for (const s of def.states) {
@@ -4363,6 +4386,9 @@ function sessionView(app, id) {
     (n.connections || []).forEach((c, i) => {
       const def = Object.assign({}, ACMP_CONNECTION_MACHINE, { svgId: 'topo-machine-acmp-conn-' + i });
       const card = machineCard(def, connLive(c), null);
+      /* tag so a click on the graph's stream link can scroll to this card */
+      card.dataset.acmp = '1';
+      card.dataset.slabel = shortStream(c.stream_id) || '';
       const head = card.querySelector('.machine-head');
       if (head) head.appendChild(h('div', { class: 'acmp-eps' },
         h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Talker '),
@@ -4410,6 +4436,9 @@ function sessionView(app, id) {
       if (body) body.after(mrpApplicantEvents());
       mrp.push(applCard);
     }
+    /* every ACMP-group card is a scroll target for a graph stream-link click
+       (connection cards already carry data-slabel to match the exact stream) */
+    for (const c of acmp) if (c && c.dataset && !c.dataset.acmp) c.dataset.acmp = '1';
     const groups = [
       protoGroup('ATDECC — ADP', 'ADP', adp, 'dev-adp'),
       protoGroup('gPTP (802.1AS)', 'GPTP', gptpC, 'dev-gptp'),
@@ -4587,21 +4616,24 @@ function sessionView(app, id) {
       };
       layout();
 
-      if (grip) topoLabelDrag(grip, geom, key, mcx, mcy, layout);
+      if (grip) topoLabelDrag(grip, geom, key, mcx, mcy, layout, e);
     }
     graph.insertBefore(svgEl, graph.firstChild);
   }
 
-  /* drag a link's label to move it and bend the link's curve; the offset is
-     stored per session so it survives scrubbing and node moves */
-  function topoLabelDrag(grip, geom, key, mcx, mcy, layout) {
+  /* drag a link's label to move it and bend the link's curve (offset stored per
+     session); a plain click (no real drag) instead jumps to the link's ACMP
+     connection machine below. */
+  function topoLabelDrag(grip, geom, key, mcx, mcy, layout, edge) {
     grip.addEventListener('pointerdown', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       const gr = topoGraphEl ? topoGraphEl.getBoundingClientRect() : grip.ownerSVGElement.getBoundingClientRect();
+      const startX = ev.clientX, startY = ev.clientY;
       let moved = false;
-      grip.classList.add('is-dragging');
       const move = (e2) => {
+        if (!moved && Math.hypot(e2.clientX - startX, e2.clientY - startY) < 4) return;
+        if (!moved) grip.classList.add('is-dragging');
         moved = true;
         /* control point = pointer position in graph coords; the curve's apex
            (label) tracks halfway to it, so drop the label roughly where the
@@ -4616,9 +4648,34 @@ function sessionView(app, id) {
         window.removeEventListener('pointerup', up);
         grip.classList.remove('is-dragging');
         if (moved) topoSaveBend(key, geom.bend.dx, geom.bend.dy);
+        else topoStreamLabelClick(edge);   /* a click, not a drag */
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
+    });
+  }
+
+  /* click a stream/binding link's label -> reveal its ACMP connection machine:
+     select the talker device (the panel swaps to its machines) and scroll the
+     matching card into view, briefly flashing it. */
+  function topoStreamLabelClick(edge) {
+    if (!edge || (edge.kind !== 'stream' && edge.kind !== 'binding')) return;
+    smGroupCollapsed.delete('dev-acmp');       /* make sure the ACMP group is open */
+    const wantSlabel = edge.label || '';
+    selectTopoNode(edge.from);                 /* re-renders the machines panel */
+    requestAnimationFrame(() => {
+      if (!topoPanelHost) return;
+      const cards = [...topoPanelHost.querySelectorAll('.machine-card[data-acmp]')];
+      const target = cards.find((c) => c.dataset.slabel && c.dataset.slabel === wantSlabel)
+        || cards[0];
+      if (!target) return;
+      if (target.classList.contains('is-collapsed')) {
+        const head = target.querySelector(':scope > .machine-head');
+        if (head) head.click();                /* expand a folded card */
+      }
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('flash-card');
+      setTimeout(() => target.classList.remove('flash-card'), 1400);
     });
   }
 
@@ -4627,7 +4684,7 @@ function sessionView(app, id) {
       h('span', { class: 'tl-item' }, h('span', { class: 'tl-line tl-sync' }), 'gPTP sync (master → slave)'),
       h('span', { class: 'tl-item' }, h('span', { class: 'tl-line tl-stream' }), 'stream (talker → listener)'),
       h('span', { class: 'tl-item' }, h('span', { class: 'tl-line tl-binding' }), 'ACMP binding (bound, no stream)'),
-      h('span', { class: 'tl-item dim' }, 'drag a device card to rearrange · drag a link label to bend it'));
+      h('span', { class: 'tl-item dim' }, 'drag a device card to rearrange · drag a link label to bend it · click a stream label for its ACMP machine'));
   }
 
   function renderTopologyTab() {

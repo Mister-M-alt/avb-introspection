@@ -869,11 +869,19 @@ select.input {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(21, 24, 29, 0.85);
   border-radius: 4px;
   padding: 1px 4px;
 }
-.tl-hint { font-size: 10.5px; }
+/* the verbose help text covered the timeline markers in the top-right corner,
+   so keep only the Fit button by default and reveal the hint on hover */
+.tl-hint {
+  font-size: 10.5px;
+  display: none;
+  background: rgba(21, 24, 29, 0.9);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+.tl-wrap:hover .tl-hint { display: inline; }
 
 .tl-tooltip {
   position: absolute;
@@ -977,8 +985,16 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 
 /* per-device state-machine popup window (real browser window opened via
    window.open; shares this stylesheet, tracks the opener's timeline cursor) */
-body.mwin-doc { padding: 10px 14px; }
-body.mwin-doc .mwin-body { max-width: 900px; }
+/* the popup machine window reuses this stylesheet, so undo the app shell's
+   fixed full-height / overflow:hidden layout — the popup must scroll natively */
+body.mwin-doc {
+  display: block;
+  height: auto;
+  min-height: 100%;
+  overflow: auto;
+  padding: 10px 14px;
+}
+body.mwin-doc .mwin-body { max-width: 900px; overflow: visible; }
 
 /* events table */
 
@@ -1575,6 +1591,12 @@ input.marker-label { width: 100%; }
   padding: 10px 12px;
   margin-bottom: 12px;
 }
+/* brief highlight when scrolled to from a graph stream-link click */
+.machine-card.flash-card { animation: flash-card 1.4s ease-out; }
+@keyframes flash-card {
+  0%, 30% { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent); }
+  100% { border-color: var(--border); box-shadow: none; }
+}
 .machine-head { margin-bottom: 8px; }
 /* second machine inside one card (e.g. the MDPdelayResp responder below the
    initiator) — same look as machine-head but hides when the card collapses */
@@ -1702,6 +1724,9 @@ input.marker-label { width: 100%; }
 
 /* edges */
 .sm-edge { fill: none; stroke: #59606b; stroke-width: 1.5; }
+/* an observed transition the spec diagram has no edge for (capture started
+   mid-state) — dashed so it reads as "off the spec path" but still clickable */
+.sm-edge-obs { stroke-dasharray: 5 4; }
 .sm-edge.is-visited {
   stroke: color-mix(in srgb, var(--sm-accent) 50%, transparent);
   stroke-width: 1.8;
