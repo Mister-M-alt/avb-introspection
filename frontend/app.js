@@ -593,6 +593,16 @@ function homeView(app) {
   });
   const openBtn = h('button', { class: 'btn', type: 'button', onclick: openPath }, 'Open');
 
+  const sessHead = h('div', { class: 'slist-head' },
+    h('span', null, 'Name'), h('span', null, 'Status'), h('span', { class: 'num' }, 'Packets'),
+    h('span', { class: 'num' }, 'Events'), h('span', { class: 'num' }, 'Errors'),
+    h('span', { class: 'num' }, 'Duration'), h('span', null, 'Created'), h('span', null, ''),
+  );
+  const sessPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Analysis sessions')),
+    sessHead,
+    sessList,
+  );
   app.appendChild(
     h('div', { class: 'home' },
       metricsBox,
@@ -609,30 +619,25 @@ function homeView(app) {
             'Path must be visible to the backend (e.g. a mounted volume). pcap and pcapng are accepted.'),
         ),
       ),
-      h('section', { class: 'panel' },
-        h('div', { class: 'panel-head' }, h('h2', null, 'Analysis sessions')),
-        h('div', { class: 'slist-head' },
-          h('span', null, 'Name'), h('span', null, 'Status'), h('span', { class: 'num' }, 'Packets'),
-          h('span', { class: 'num' }, 'Events'), h('span', { class: 'num' }, 'Errors'),
-          h('span', { class: 'num' }, 'Duration'), h('span', null, 'Created'), h('span', null, ''),
-        ),
-        sessList,
-      ),
+      sessPanel,
     ),
   );
+  makeColsResizable(sessHead, sessPanel, '--sesscols', 'sessions');
 
+  /* upload only adds to the library — the user starts analysis explicitly
+     (Analyze / Combine), so bulk uploads don't open a session per file */
   async function uploadFile(file) {
     uploadBtn.disabled = true;
     uploadBtn.textContent = 'Uploading…';
     try {
-      const p = await api('/api/pcaps?name=' + encodeURIComponent(file.name), {
+      await api('/api/pcaps?name=' + encodeURIComponent(file.name), {
         method: 'POST', body: file, contentType: 'application/octet-stream',
       });
-      const s = await api('/api/sessions', { method: 'POST', json: { pcap_id: p.id } });
-      toast('uploaded ' + file.name + ' — analysis started');
-      navigate('#/session/' + encodeURIComponent(s.id));
+      toast('uploaded ' + file.name);
+      refresh();
     } catch (err) {
       toast('upload failed: ' + err.message, 'error');
+    } finally {
       uploadBtn.disabled = false;
       uploadBtn.textContent = 'Upload pcap…';
     }
@@ -1000,6 +1005,70 @@ function protoGroup(label, protoKey, cards, groupKey) {
     toggle();
   });
   return group;
+}
+
+/* ── resizable table columns ──────────────────────────────────────────────
+   Works on any header-row + sibling-rows grid table: header cells get a drag
+   grip on their right edge; dragging writes a px track list into a CSS
+   variable on `scope`, which the shared grid-template-columns rule reads
+   (grid-template-columns: var(<varName>, <stylesheet default>)). The last
+   column stays flexible so the table keeps filling its container. Widths
+   persist per `key`; double-clicking a grip resets to the defaults.
+   Grips are absolutely positioned so they never become grid items. */
+function makeColsResizable(head, scope, varName, key) {
+  if (!head || !scope || head.dataset.gripped) return;
+  head.dataset.gripped = '1';
+  head.classList.add('has-grips');
+  const store = 'avb.cols.' + key;
+  const cells = [...head.children];
+  let widths = null;                    /* px per column; null = flexible */
+  try { widths = JSON.parse(localStorage.getItem(store) || 'null'); } catch { widths = null; }
+  if (!Array.isArray(widths) || widths.length !== cells.length) widths = null;
+  const grips = [];
+  const place = () => {
+    for (const g of grips) g.style.left = (g._cell.offsetLeft + g._cell.offsetWidth - 4) + 'px';
+  };
+  const apply = () => {
+    if (widths) {
+      scope.style.setProperty(varName, widths.map((w, i) =>
+        (w == null || i === widths.length - 1) ? 'minmax(60px, 1fr)' : Math.round(w) + 'px').join(' '));
+    } else {
+      scope.style.removeProperty(varName);
+    }
+    place();
+  };
+  cells.forEach((cell, i) => {
+    if (i === cells.length - 1) return;     /* last column always flexes */
+    const g = h('span', { class: 'col-grip', title: 'drag to resize · double-click to reset' });
+    g._cell = cell;
+    g.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!widths) widths = cells.map((c, j) =>
+        j === cells.length - 1 ? null : c.getBoundingClientRect().width);
+      const startX = ev.clientX;
+      const startW = widths[i] == null ? cell.getBoundingClientRect().width : widths[i];
+      const move = (e2) => { widths[i] = Math.max(28, startW + (e2.clientX - startX)); apply(); };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        document.body.classList.remove('col-resizing');
+        try { localStorage.setItem(store, JSON.stringify(widths)); } catch { /* quota */ }
+      };
+      document.body.classList.add('col-resizing');
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+    g.addEventListener('dblclick', () => {
+      widths = null;
+      localStorage.removeItem(store);
+      apply();
+    });
+    grips.push(g);
+    head.appendChild(g);
+  });
+  apply();
+  if (window.ResizeObserver) new ResizeObserver(place).observe(head);
 }
 
 function drawMachine(container, def, live) {
@@ -1378,7 +1447,36 @@ const GPTP_MD_PDELAY_REQ_MACHINE = {
   ],
   note: 'Reconstructed per port from observed peer-delay timing — a lost or late '
     + 'Pdelay_Resp / Follow_Up drives MDPdelayReq to RESET (802.1AS 11.2.15). '
-    + 'The MDPdelayResp (responder) and MDSyncSend states are shown as badges above.',
+    + 'The MDSyncSend state is shown as a badge above.',
+};
+
+/* gPTP media-dependent Pdelay-response machine (802.1AS-2020 Figure 11-10) —
+   the responder side: answer a peer's Pdelay_Req, then send the follow-up
+   carrying the response egress timestamp. Node ids match md.pdelay_resp_state. */
+const GPTP_MD_PDELAY_RESP_MACHINE = {
+  title: 'gPTP MD Pdelay Response',
+  subtitle: '802.1AS-2020 Clause 11 — MDPdelayResp (peer-delay responder)',
+  svgId: 'topo-machine-gptp-md-resp', accent: PROTO_COLORS.GPTP,
+  view: { x: 0, y: -30, w: 740, h: 260 }, minW: 560,
+  states: [
+    { id: 'NOT_ENABLED', x: 40, y: 90, sub: 'port down' },
+    { id: 'WAITING_FOR_PDELAY_REQ', label: 'WAIT_REQ', x: 290, y: 90, sub: 'idle' },
+    { id: 'SENT_PDELAY_RESP_WAITING_FOR_TIMESTAMP', label: 'SENT_RESP', x: 540, y: 90,
+      sub: 'awaiting egress ts' },
+  ],
+  edges: [
+    { from: 'NOT_ENABLED', to: 'WAITING_FOR_PDELAY_REQ',
+      fromSide: 'R', fromT: 0.5, toSide: 'L', toT: 0.5, label: 'portEnabled', labelAt: { x: 242, y: 106 } },
+    { from: 'WAITING_FOR_PDELAY_REQ', to: 'SENT_PDELAY_RESP_WAITING_FOR_TIMESTAMP',
+      fromSide: 'R', fromT: 0.38, toSide: 'L', toT: 0.38,
+      label: ['REQ rx /', 'send Pdelay_Resp'], labelAt: { x: 492, y: 66 } },
+    { from: 'SENT_PDELAY_RESP_WAITING_FOR_TIMESTAMP', to: 'WAITING_FOR_PDELAY_REQ',
+      fromSide: 'B', fromT: 0.5, toSide: 'B', toT: 0.62, via: [{ x: 590, y: 190 }, { x: 372, y: 190 }],
+      label: ['send', 'Resp_Follow_Up'], labelAt: { x: 480, y: 205 } },
+  ],
+  note: 'Reconstructed per port from the Pdelay_Resp / Resp_Follow_Up frames this '
+    + 'port sends. A port that never answers a peer’s Pdelay_Req stays dim here '
+    + '(no responder activity observed in the capture).',
 };
 
 /* ── network-wide state machines (not tied to one device) ──────────────────
@@ -1642,27 +1740,33 @@ function adminView(app) {
   const createForm = h('form', { class: 'admin-create-form', onsubmit: createUser },
     newUser, newPass, newRole, createBtn);
 
+  const auHead = h('div', { class: 'au-head' },
+    h('span', null, 'Username'), h('span', null, 'Role'),
+    h('span', null, 'Online'), h('span', null, ''));
+  const auPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Users')),
+    auHead,
+    usersBox,
+    createForm,
+  );
+  const apHead = h('div', { class: 'ap-head' },
+    h('span', null, 'Username'), h('span', null, 'View'),
+    h('span', { class: 'num' }, 'Idle'));
+  const apPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Presence'),
+      h('span', { class: 'dim small' }, 'one entry per login session · 60 s expiry')),
+    apHead,
+    presBox,
+  );
   app.appendChild(
     h('div', { class: 'home admin' },
       metricsBox,
-      h('section', { class: 'panel' },
-        h('div', { class: 'panel-head' }, h('h2', null, 'Users')),
-        h('div', { class: 'au-head' },
-          h('span', null, 'Username'), h('span', null, 'Role'),
-          h('span', null, 'Online'), h('span', null, '')),
-        usersBox,
-        createForm,
-      ),
-      h('section', { class: 'panel' },
-        h('div', { class: 'panel-head' }, h('h2', null, 'Presence'),
-          h('span', { class: 'dim small' }, 'one entry per login session · 60 s expiry')),
-        h('div', { class: 'ap-head' },
-          h('span', null, 'Username'), h('span', null, 'View'),
-          h('span', { class: 'num' }, 'Idle')),
-        presBox,
-      ),
+      auPanel,
+      apPanel,
     ),
   );
+  makeColsResizable(auHead, auPanel, '--aucols', 'admin-users');
+  makeColsResizable(apHead, apPanel, '--apcols', 'admin-presence');
 
   async function createUser(ev) {
     ev.preventDefault();
@@ -1793,7 +1897,9 @@ function sessionView(app, id) {
     deviceNames: new Map(),  /* mac -> user name || auto entity name */
     timeMode: localStorage.getItem(TIME_MODE_KEY) === 'tod' ? 'tod' : 'rel',
     entityNames: new Map(),
+    entityDeviceNames: new Map(),  /* entity id -> owning device's label */
     srcMap: null,            /* Uint16Array: per-packet source index (combined) */
+    origPos: null,           /* Uint32Array: per-packet position in its source pcap */
     packetCache: new Map(),
     progress: null,          /* last WS progress message */
     done: false,             /* analysis finished AND final data refreshed */
@@ -1905,7 +2011,8 @@ function sessionView(app, id) {
 
   /* ── events table DOM (virtualized) ── */
   const tableHead = h('div', { class: 'etable-head' },
-    h('span', { class: 'c-idx' }, '#'),
+    h('span', { class: 'c-idx', title: 'event index in this session' }, '#'),
+    h('span', { class: 'c-orig', title: 'packet number in its original pcap' }, 'Pkt'),
     h('span', { class: 'c-ts' }, 'Time'),
     h('span', { class: 'c-proto' }, 'Proto'),
     h('span', { class: 'c-type' }, 'Type'),
@@ -1948,7 +2055,7 @@ function sessionView(app, id) {
   const mainSplit = h('div', { class: 'session-main' }, eventsPanel, splitGutter, inspectorPanel);
 
   /* ── assemble ── */
-  app.appendChild(
+  const viewRoot =
     h('div', { class: 'session-view' },
       h('div', { class: 'toolbar' },
         h('div', { class: 'toolbar-row' },
@@ -1972,8 +2079,9 @@ function sessionView(app, id) {
       ),
       tlWrap,
       mainSplit,
-    ),
-  );
+    );
+  app.appendChild(viewRoot);
+  makeColsResizable(tableHead, eventsPanel, '--ecols', 'events');
 
   /* ────────── filtering ────────── */
 
@@ -2081,8 +2189,14 @@ function sessionView(app, id) {
       const glyph = e.kind === 'transition'
         ? h('span', { class: 'kg kg-tr' }, '◆ ')
         : (e.kind === 'error' ? h('span', { class: 'kg kg-err' }, '✕ ') : null);
+      const op = origPosOf(e.n);
+      const al2 = si >= 0 ? srcAlias(si) : null;
       frag.appendChild(h('div', { class: cls, dataset: { i: String(i) }, title: title },
         h('span', { class: 'c-idx mono' }, i),
+        h('span', {
+          class: 'c-orig mono',
+          title: op ? ('packet #' + op + (al2 ? ' in ' + al2 : ' in the source pcap')) : null,
+        }, op ? String(op) : ''),
         h('span', { class: 'c-ts mono' }, fmtTime(e.ts)),
         h('span', { class: 'c-proto' }, h('span', { class: 'badge ' + protoClass(e.proto) }, e.proto)),
         h('span', { class: 'c-type' }, glyph, e.type || ''),
@@ -2214,11 +2328,25 @@ function sessionView(app, id) {
 
   function rebuildDeviceNames() {
     S.deviceNames.clear();
+    S.entityDeviceNames.clear();
     const devs = (S.infoData && S.infoData.devices) || [];
     for (const d of devs) {
       const label = d.name || d.entity_name || '';
-      if (d.mac && label) S.deviceNames.set(String(d.mac).toLowerCase(), label);
+      if (!label) continue;
+      if (d.mac) S.deviceNames.set(String(d.mac).toLowerCase(), label);
+      /* every entity id proven to belong to this MAC inherits the device's
+         name, so controller/listener ids resolve to e.g. the renamed device */
+      for (const eid of [d.entity_id].concat(d.assoc_entity_ids || [])) {
+        if (eid) S.entityDeviceNames.set(String(eid).toLowerCase(), label);
+      }
     }
+  }
+
+  /* name for an entity id: AEM entity name, else its device's label */
+  function entityName(idStr) {
+    if (!idStr) return null;
+    return S.entityNames.get(idStr)
+      || S.entityDeviceNames.get(String(idStr).toLowerCase()) || null;
   }
 
   /* user/auto name for a MAC, or null when unknown */
@@ -2270,6 +2398,7 @@ function sessionView(app, id) {
       if (S.tab === 'info') renderInfoTab();
       else if (S.tab === 'topology') renderTopologyTab();
       else if (S.tab === 'inspect') renderInspector();
+      renderMachineWins();           /* device names may have changed */
       scheduleTable();               /* src/dst labels may have changed */
     } catch (err) {
       if (!S.closed) toast('session info: ' + err.message, 'error');
@@ -2284,6 +2413,15 @@ function sessionView(app, id) {
         { headers: token ? { Authorization: 'Bearer ' + token } : {} });
       if (!res.ok) return;
       S.srcMap = new Uint16Array(await res.arrayBuffer());
+      /* per-source running counter -> position of each packet in its source */
+      const pos = new Uint32Array(S.srcMap.length);
+      const counters = [];
+      for (let k = 0; k < S.srcMap.length; k++) {
+        const s = S.srcMap[k];
+        counters[s] = (counters[s] || 0) + 1;
+        pos[k] = counters[s];
+      }
+      S.origPos = pos;
       renderSourceLegend();
       scheduleTable();
     } catch (err) { /* non-fatal: rows just won't be source-coloured */ }
@@ -2293,6 +2431,13 @@ function sessionView(app, id) {
   function srcOf(n) {
     return (S.srcMap && typeof n === 'number' && n >= 1 && n <= S.srcMap.length)
       ? S.srcMap[n - 1] : -1;
+  }
+  /* position of packet n in its ORIGINAL pcap: for combined sessions the
+     per-source running index (derived from the source map), else n itself */
+  function origPosOf(n) {
+    if (typeof n !== 'number' || n < 1) return 0;
+    if (S.origPos && n <= S.origPos.length) return S.origPos[n - 1];
+    return S.srcMap ? 0 : n;   /* combined but map not loaded yet: unknown */
   }
   /* display alias for a source index */
   function srcAlias(idx) {
@@ -2342,6 +2487,7 @@ function sessionView(app, id) {
     if (opts.inspect && S.tab !== 'inspect') setTab('inspect');
     else if (S.tab === 'inspect') renderInspector();
     else if (S.tab === 'topology') syncTopologyToCursor();
+    renderMachineWins();   /* floating machine windows track the cursor too */
   }
 
   function clearSelection() {
@@ -2353,6 +2499,7 @@ function sessionView(app, id) {
     /* back to the final observed state on the time-tracking views */
     if (S.tab === 'inspect') renderInspector();
     else if (S.tab === 'topology') syncTopologyToCursor();
+    renderMachineWins();
   }
 
   function jumpToPacket(n) {
@@ -2429,7 +2576,7 @@ function sessionView(app, id) {
 
   function entityLabel(idStr) {
     if (!idStr) return null;
-    const name = S.entityNames.get(idStr);
+    const name = entityName(idStr);
     return h('span', { class: 'ent' },
       name ? h('b', null, name + ' ') : null,
       h('span', { class: 'mono' }, idStr));
@@ -2655,6 +2802,7 @@ function sessionView(app, id) {
       }
       if (S.tab === 'state') renderStateTab();
       else if (S.tab === 'topology') renderTopologyTab();
+      renderMachineWins();
     } catch (err) {
       if (!S.closed) toast('state: ' + err.message, 'error');
     } finally {
@@ -2918,7 +3066,7 @@ function sessionView(app, id) {
 
   /* option/short label for an entity id: user/AEM name if known, else the id */
   function entText(idStr) {
-    return (idStr && S.entityNames.get(idStr)) || idStr || '?';
+    return (idStr && entityName(idStr)) || idStr || '?';
   }
 
   /* ── time-indexed overlays ────────────────────────────────────────────
@@ -3079,8 +3227,8 @@ function sessionView(app, id) {
       if (!n) {
         n = {
           mac: key, entity_id: '', entity_name: '', name: '', label: key,
-          protocols: [], packets: 0, ports: [], entity: null,
-          milanSinks: [], mrp: [], roles: new Set(),
+          assocIds: [], protocols: [], packets: 0, ports: [], entity: null,
+          milanSinks: [], talkerSinks: [], mrp: [], roles: new Set(),
           clockIds: new Set(), synthetic: false,
         };
         devices.set(key, n);
@@ -3093,6 +3241,7 @@ function sessionView(app, id) {
       n.entity_id = d.entity_id || '';
       n.entity_name = d.entity_name || '';
       n.name = d.name || '';
+      n.assocIds = (d.assoc_entity_ids || []).slice();
       n.protocols = (d.protocols || []).slice();
       n.packets = d.packets || 0;
       n.label = d.name || d.entity_name || d.mac;
@@ -3100,12 +3249,22 @@ function sessionView(app, id) {
     /* one entity_id can map to several MACs (seamless redundancy); keep all so
        a redundant device's roles/machines are not silently dropped. */
     const entityToMacs = new Map();
-    for (const n of devices.values()) {
-      if (!n.entity_id) continue;
-      const k = tnorm(n.entity_id);
+    const mapEntity = (id, mac) => {
+      const k = tnorm(id);
+      if (!k || isZeroId(k)) return;
       const arr = entityToMacs.get(k) || [];
-      if (!arr.includes(n.mac)) arr.push(n.mac);
+      if (!arr.includes(mac)) arr.push(mac);
       entityToMacs.set(k, arr);
+    };
+    for (const n of devices.values()) {
+      if (n.entity_id) mapEntity(n.entity_id, n.mac);
+    }
+    /* secondary ids (AECP/ACMP controllers, emulated talkers/listeners) map
+       after the ADP-advertised ones so those keep the primary slot; this is
+       what ties a pure controller (e.g. a certification test machine) to the
+       ACMP/AECP state it produced. */
+    for (const n of devices.values()) {
+      for (const aid of n.assocIds || []) mapEntity(aid, n.mac);
     }
     const macsFor = (id) => entityToMacs.get(tnorm(id)) || [];
     const entityToMac = new Map();   /* first MAC per entity — single-endpoint edges */
@@ -3147,6 +3306,15 @@ function sessionView(app, id) {
         const n = devices.get(mac); if (n) { n.milanSinks.push(s); n.roles.add('Listener'); }
       }
       for (const cm of macsFor(s.controller)) { const n = devices.get(cm); if (n) n.roles.add('Controller'); }
+      /* Milan talkers are stateless — the binding state machine lives in the
+         listener sink. Still surface it on the bound talker's device, so a
+         DUT-centric view shows the machines of streams it talks into. */
+      if (s.bound_talker && !isZeroId(s.bound_talker)) {
+        for (const tm of macsFor(s.bound_talker)) {
+          const n = devices.get(tm);
+          if (n && !n.milanSinks.includes(s)) { n.talkerSinks.push(s); n.roles.add('Talker'); }
+        }
+      }
     }
     for (const t of st.milan_talkers || []) {
       for (const mac of macsFor(t.talker_entity)) { const n = devices.get(mac); if (n) n.roles.add('Talker'); }
@@ -3326,8 +3494,8 @@ function sessionView(app, id) {
     return el;
   }
 
-  /* one gPTP port's MD Pdelay machine (reuses drawMachine) + responder/sync
-     states as badges + the port's transition history */
+  /* one gPTP port's MD Pdelay machines (initiator + responder, reusing
+     drawMachine) + sync state as a badge + the port's transition history */
   function topoPortCard(p, idx) {
     const md = p.md || {};
     const def = Object.assign({}, GPTP_MD_PDELAY_REQ_MACHINE, {
@@ -3346,10 +3514,23 @@ function sessionView(app, id) {
     };
     const scroll = h('div', { class: 'sm-scroll' });
     drawMachine(scroll, def, live);
+    /* the responder side (Figure 11-10): this port answering the peer's
+       Pdelay_Req — dim when this port never responded on the wire */
+    const respDef = Object.assign({}, GPTP_MD_PDELAY_RESP_MACHINE, {
+      svgId: (idx === 0 ? 'topo-machine-gptp-md-resp' : 'topo-machine-gptp-md-resp-' + idx),
+    });
+    const respLive = {
+      current: md.pdelay_resp_state || null,
+      history: [],
+      visited: new Set(md.pdelay_resp_state ? [md.pdelay_resp_state] : []),
+    };
+    const respScroll = h('div', { class: 'sm-scroll' });
+    drawMachine(respScroll, respDef, respLive);
     const kv = (k, badge) => h('span', { class: 'kv' }, h('span', { class: 'kv-k' }, k + ' '), badge);
     /* role and asCapable are reconstructed transitions → shown as of the cursor */
     const roleT = portFieldAt(p, GPTP_ROLE_ONLY, p.role || 'UNKNOWN');
     const ascapT = portFieldAt(p, GPTP_ASCAP_ONLY, p.as_capable || 'UNKNOWN');
+    const pd = p.pdelay || {};
     const card = h('div', { class: 'machine-card' + (topoSelPort === p.port ? ' is-focus' : '') },
       h('div', { class: 'machine-head' },
         h('span', { class: 'machine-title' }, def.title),
@@ -3357,11 +3538,19 @@ function sessionView(app, id) {
       h('div', { class: 'topo-badges' },
         stateBadge(roleT),
         stateBadge(ascapT, true),
-        (md.pdelay_resp_state && md.pdelay_resp_state !== 'NOT_ENABLED') ? kv('MDPdelayResp', stateBadge(md.pdelay_resp_state, true)) : null,
-        (md.sync_send_state && md.sync_send_state !== 'NOT_ENABLED') ? kv('MDSyncSend', stateBadge(md.sync_send_state, true)) : null),
+        (md.sync_send_state && md.sync_send_state !== 'NOT_ENABLED') ? kv('MDSyncSend', stateBadge(md.sync_send_state, true)) : null,
+        (typeof pd.initiated === 'number' && pd.initiated > 0)
+          ? h('span', { class: 'sbadge sm ' + (pd.lost > 0 ? 'st-warn' : 'st-good') },
+              'pdelay ' + pd.complete + '/' + pd.initiated + ' answered'
+              + (pd.lost ? ' · ' + pd.lost + ' lost' : '')) : null),
       scroll,
       h('div', { class: 'machine-note mn-live' },
         'MDPdelayReq free-runs (~1/s) with no per-cycle history — shown at its final observed position; the port role / asCapable above track the cursor.'),
+      h('div', { class: 'machine-subhead' },
+        h('span', { class: 'machine-title' }, respDef.title),
+        h('span', { class: 'machine-sub dim small' }, respDef.subtitle)),
+      respScroll,
+      h('div', { class: 'machine-note' }, respDef.note),
       (Array.isArray(p.history) && p.history.length)
         ? h('div', { class: 'dim small mt4' }, 'port role / asCapable transitions') : null,
       historyBlock(p.history),
@@ -3484,16 +3673,65 @@ function sessionView(app, id) {
   /* ACMP endpoint as ENTITY_ID(NAME):STREAM_UNIQUE_ID (name only when known) */
   function acmpEndpoint(entityId, uid) {
     if (!entityId || isZeroId(entityId)) return h('span', { class: 'acmp-ep dim' }, '— (unbound)');
-    const name = S.entityNames.get(entityId);
+    const name = entityName(entityId);
     return h('span', { class: 'acmp-ep' },
       h('span', { class: 'mono acmp-ep-id' }, entityId),
       name ? h('span', { class: 'acmp-ep-name' }, '(' + name + ')') : null,
       h('span', { class: 'mono acmp-ep-uid' }, ':' + (uid != null ? uid : '?')));
   }
 
-  /* every reconstructed machine for one device, bound to its live data */
-  function topoMachinesPanel(n) {
-    const adp = [], gptpC = [], acmp = [], mrp = [];
+  /* AECP has no tap-observable state machine — the transaction log IS its
+     state: one card per controller↔target pair this device participates in */
+  function aecpPairCard(a, role, i) {
+    const rows = (a.last || []).map((cmd) => h('div', { class: 'aecp-row' },
+      h('span', { class: 'mono dim' }, 'seq ' + cmd.sequence_id),
+      h('span', { class: 'mono' }, cmd.command),
+      stateBadge(cmd.status, true),
+      h('span', { class: 'mono dim' },
+        typeof cmd.rtt_ms === 'number' ? cmd.rtt_ms.toFixed(1) + ' ms' : '')));
+    const card = h('div', { class: 'machine-card' },
+      h('div', { class: 'machine-head' },
+        h('span', { class: 'machine-title' }, 'AECP transactions — as ' + role),
+        h('span', { class: 'machine-sub dim small' },
+          entityLabel(a.controller), ' → ', entityLabel(a.target))),
+      h('div', { class: 'topo-badges' },
+        h('span', { class: 'kv' }, h('span', { class: 'kv-k' }, 'commands '),
+          h('span', { class: 'mono' }, String(a.commands || 0))),
+        h('span', { class: 'kv' }, h('span', { class: 'kv-k' }, 'responses '),
+          h('span', { class: 'mono' }, String(a.responses || 0))),
+        a.timeouts > 0 ? h('span', { class: 'sbadge st-warn sm' }, a.timeouts + ' timeouts') : null,
+        a.unsolicited > 0 ? h('span', { class: 'sbadge st-neutral sm' }, a.unsolicited + ' unsolicited') : null),
+      rows.length ? h('div', { class: 'aecp-last' }, rows) : null);
+    return foldableCard(card, 'dev-aecp-' + i);
+  }
+
+  /* ENTITY_ID(NAME):STREAM_UNIQUE_ID for the talker source and listener sink,
+     plus the StreamID — shown in the card header so it stays visible folded */
+  function acmpEpsBlock(s) {
+    return h('div', { class: 'acmp-eps' },
+      h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Talker '),
+        acmpEndpoint(s.bound_talker, s.bound_talker_unique_id)),
+      h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Listener '),
+        acmpEndpoint(s.listener_entity, s.listener_unique_id)),
+      (s.stream_id && !isZeroId(s.stream_id))
+        ? h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'StreamID '),
+            h('span', { class: 'mono acmp-ep-id' }, s.stream_id)) : null);
+  }
+
+  /* every reconstructed machine for one device, bound to its live data.
+     opts.win: rendered inside a floating window — show all ports (ignore the
+     inline port focus) and omit the "open in window" button. */
+  function topoMachinesPanel(n, opts) {
+    opts = opts || {};
+    const adp = [], gptpC = [], acmp = [], mrp = [], aecpC = [];
+    /* all entity ids this MAC is proven to own (advertised + associated) */
+    const nodeIds = new Set([n.entity_id].concat(n.assocIds || [])
+      .map(tnorm).filter((x) => x && !isZeroId(x)));
+    ((S.stateData || {}).aecp || []).forEach((a, i) => {
+      const asCtl = nodeIds.has(tnorm(a.controller));
+      if (!asCtl && !nodeIds.has(tnorm(a.target))) return;
+      aecpC.push(aecpPairCard(a, asCtl ? 'controller' : 'target', i));
+    });
     if (n.entity) {
       const def = Object.assign({}, ADP_ENTITY_MACHINE, { svgId: 'topo-machine-entity' });
       adp.push(machineCard(def, entityLive(n.entity), null));
@@ -3502,27 +3740,32 @@ function sessionView(app, id) {
         advertiseLive(n.entity), null));
     }
     let ports = n.ports || [];
-    if (topoSelPort) ports = ports.filter((p) => p.port === topoSelPort);   /* focus one */
-    ports.forEach((p, i) => gptpC.push(topoPortCard(p, topoSelPort ? 0 : i)));
+    const selPort = opts.win ? null : topoSelPort;
+    if (selPort) ports = ports.filter((p) => p.port === selPort);   /* focus one */
+    ports.forEach((p, i) => gptpC.push(topoPortCard(p, selPort ? 0 : i)));
     (n.milanSinks || []).forEach((s, i) => {
       const def = Object.assign({}, ACMP_MACHINE, { svgId: i === 0 ? 'topo-machine-acmp' : 'topo-machine-acmp-' + i });
       const card = machineCard(def, sinkLive(s), null);
-      /* ENTITY_ID(NAME):STREAM_UNIQUE_ID for the talker source and listener sink,
-         plus the StreamID — shown in the header so it stays visible when folded */
       const head = card.querySelector('.machine-head');
-      if (head) head.appendChild(h('div', { class: 'acmp-eps' },
-        h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Talker '),
-          acmpEndpoint(s.bound_talker, s.bound_talker_unique_id)),
-        h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'Listener '),
-          acmpEndpoint(s.listener_entity, s.listener_unique_id)),
-        (s.stream_id && !isZeroId(s.stream_id))
-          ? h('span', { class: 'acmp-ep-row' }, h('span', { class: 'acmp-ep-k' }, 'StreamID '),
-              h('span', { class: 'mono acmp-ep-id' }, s.stream_id)) : null));
+      if (head) head.appendChild(acmpEpsBlock(s));
       acmp.push(card);
       /* talker-discovery machine for this bound sink */
       adp.push(machineCard(Object.assign({}, ADP_DISCOVERY_MACHINE,
         { svgId: i === 0 ? 'topo-machine-adp-discovery' : 'topo-machine-adp-discovery-' + i }),
         discoveryLive(s), null));
+    });
+    /* sink machines of streams this device TALKS into (the machine itself
+       lives in the remote listener — Milan talkers are stateless) */
+    (n.talkerSinks || []).forEach((s, i) => {
+      const def = Object.assign({}, ACMP_MACHINE, { svgId: 'topo-machine-acmp-tlk-' + i });
+      const card = machineCard(def, sinkLive(s), null);
+      const head = card.querySelector('.machine-head');
+      if (head) {
+        head.appendChild(h('span', { class: 'machine-sub dim small' },
+          'remote listener’s sink — this device is the talker'));
+        head.appendChild(acmpEpsBlock(s));
+      }
+      acmp.push(card);
     });
     (n.mrp || []).forEach((m, i) => {
       const def = Object.assign({}, MRP_REGISTRAR_MACHINE, {
@@ -3548,18 +3791,86 @@ function sessionView(app, id) {
       protoGroup('ATDECC — ADP', 'ADP', adp, 'dev-adp'),
       protoGroup('gPTP (802.1AS)', 'GPTP', gptpC, 'dev-gptp'),
       protoGroup('ATDECC — ACMP', 'ACMP', acmp, 'dev-acmp'),
+      protoGroup('ATDECC — AECP', 'AECP', aecpC, 'dev-aecp'),
       protoGroup('MRP (802.1Q)', 'MSRP', mrp, 'dev-mrp'),
     ].filter(Boolean);
+    const winBtn = opts.win ? null : h('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button',
+      title: 'open this device’s state machines in a floating window (keeps tracking the timeline cursor)',
+      onclick: () => openMachineWindow(n.mac),
+    }, '⧉ window');
     const head = h('div', { class: 'topo-panel-head' },
       h('span', { class: 'machine-title' }, n.label),
       h('span', { class: 'mono dim small' }, n.synthetic ? 'inferred bridge' : n.mac),
       topoRoleBadges(n),
-      topoSelPort ? h('span', { class: 'sbadge st-neutral sm' }, 'port ' + topoSelPort) : null,
-      h('span', { class: 'toolbar-spacer' }), asOfBadge());
+      selPort ? h('span', { class: 'sbadge st-neutral sm' }, 'port ' + selPort) : null,
+      h('span', { class: 'toolbar-spacer' }), winBtn, asOfBadge());
     return h('div', { class: 'topo-panel' }, head, machineLegend(),
       groups.length ? groups : h('div', { class: 'empty small' },
         'No reconstructed state machines for this device'
         + (n.packets ? ' (' + fmtInt(n.packets) + ' packets observed).' : '.')));
+  }
+
+  /* ── floating per-device machine windows ──────────────────────────────
+     Each window shows one device's reconstructed machines and re-overlays
+     on every cursor move (renderMachineWins is called from selectEvent /
+     clearSelection / loadState / loadInfo), whatever tab is open. */
+  const machineWins = new Map();   /* mac -> { el, body } */
+  let machineWinZ = 200;
+
+  function openMachineWindow(mac) {
+    const existing = machineWins.get(mac);
+    if (existing) { existing.el.style.zIndex = ++machineWinZ; return; }
+    const body = h('div', { class: 'mwin-body' });
+    const titleSpan = h('span', { class: 'mwin-title' });
+    const closeBtn = h('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button', title: 'close',
+    }, '✕');
+    const headBar = h('div', { class: 'mwin-head' },
+      titleSpan, h('span', { class: 'toolbar-spacer' }), closeBtn);
+    const el = h('div', { class: 'mwin' }, headBar, body);
+    /* cascade from the top-right, away from the events table */
+    const idx = machineWins.size;
+    el.style.left = Math.max(8, window.innerWidth - 660 - idx * 36) + 'px';
+    el.style.top = Math.min(window.innerHeight - 240, 64 + idx * 36) + 'px';
+    el.style.zIndex = ++machineWinZ;
+    closeBtn.addEventListener('click', () => { machineWins.delete(mac); el.remove(); });
+    el.addEventListener('pointerdown', () => { el.style.zIndex = ++machineWinZ; });
+    headBar.addEventListener('pointerdown', (ev) => {
+      if (ev.target.closest('button')) return;
+      ev.preventDefault();
+      const r = el.getBoundingClientRect();
+      const dx = ev.clientX - r.left, dy = ev.clientY - r.top;
+      const move = (e2) => {
+        el.style.left = Math.max(0, Math.min(window.innerWidth - 80, e2.clientX - dx)) + 'px';
+        el.style.top = Math.max(0, Math.min(window.innerHeight - 40, e2.clientY - dy)) + 'px';
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+    machineWins.set(mac, { el, body, title: titleSpan });
+    viewRoot.appendChild(el);
+    renderMachineWins();
+  }
+
+  /* re-overlay every open window to the cursor, preserving scroll */
+  function renderMachineWins() {
+    if (!machineWins.size || !S.stateData || !S.infoData) return;
+    const model = buildTopologyModel();
+    for (const [mac, w] of machineWins) {
+      const n = model.devices.get(mac);
+      w.title.replaceChildren(
+        (n && n.label) || mac, ' ',
+        h('span', { class: 'mono dim small' }, n && n.label !== mac ? mac : ''));
+      const top = w.body.scrollTop;
+      w.body.replaceChildren(n ? topoMachinesPanel(n, { win: true })
+        : h('div', { class: 'empty small' }, 'Device ' + mac + ' not observed.'));
+      w.body.scrollTop = top;
+    }
   }
 
   function topoMarker(idv, fill) {
@@ -4018,20 +4329,23 @@ function sessionView(app, id) {
         }, 'Delete'),
       );
     });
+    const markerHead = h('div', { class: 'marker-head' },
+      h('span', null, 'Time'), h('span', null, 'Label'),
+      h('span', null, 'Packet'), h('span', null, ''));
+    const markerList = h('div', { id: 'markers-list' },
+      markerHead,
+      rows.length ? rows : h('div', { class: 'empty small' },
+        'No markers yet — select an event and press "Add marker" (or the m key).'),
+    );
     inspBody.replaceChildren(h('div', { class: 'insp-scroll' },
       h('div', { class: 'state-actions' },
         h('span', { class: 'dim small' },
           'User markers — stored in this browser, drawn on the timeline'),
         h('span', { class: 'toolbar-spacer' }),
         addBtn),
-      h('div', { id: 'markers-list' },
-        h('div', { class: 'marker-head' },
-          h('span', null, 'Time'), h('span', null, 'Label'),
-          h('span', null, 'Packet'), h('span', null, '')),
-        rows.length ? rows : h('div', { class: 'empty small' },
-          'No markers yet — select an event and press "Add marker" (or the m key).'),
-      ),
+      markerList,
     ));
+    makeColsResizable(markerHead, markerList, '--mkcols', 'markers');
     if (focusId) {
       const inp = inspBody.querySelector('.marker-label[data-id="' + focusId + '"]');
       if (inp) inp.focus();
@@ -4137,14 +4451,16 @@ function sessionView(app, id) {
           (d.protocols || []).map((p) => h('span', { class: 'badge ' + protoClass(p) }, p))),
       );
     });
+    const devHead = h('div', { class: 'dev-head' },
+      h('span', null, 'Name'), h('span', null, 'MAC'), h('span', null, 'Entity'),
+      h('span', { class: 'num' }, 'Pkts'), h('span', null, 'Protocols'));
+    const devScroll = h('div', { class: 'dev-scroll' },
+      devHead,
+      devRows.length ? devRows : h('div', { class: 'empty small' }, 'No devices observed.'),
+    );
     const devSec = h('section', { class: 'ssec' },
       h('h3', null, 'Devices ', h('span', { class: 'count mono' }, String(devices.length))),
-      h('div', { class: 'dev-scroll' },
-        h('div', { class: 'dev-head' },
-          h('span', null, 'Name'), h('span', null, 'MAC'), h('span', null, 'Entity'),
-          h('span', { class: 'num' }, 'Pkts'), h('span', null, 'Protocols')),
-        devRows.length ? devRows : h('div', { class: 'empty small' }, 'No devices observed.'),
-      ));
+      devScroll);
 
     const sources = info.sources || [];
     const srcSec = sources.length > 1 ? h('section', { class: 'ssec' },
@@ -4176,6 +4492,7 @@ function sessionView(app, id) {
         refreshBtn),
       capSec, fileSec, sessSec, srcSec, devSec,
     ));
+    makeColsResizable(devHead, devScroll, '--devcols', 'devices');
   }
 
   async function saveSourceAlias(index, inp) {

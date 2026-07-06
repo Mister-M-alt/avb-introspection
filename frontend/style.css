@@ -480,7 +480,8 @@ body {
 
 .slist-head, .srow {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) 84px 84px 84px 70px 84px 160px 70px;
+  grid-template-columns: var(--sesscols,
+    minmax(150px, 1fr) 84px 84px 84px 70px 84px 160px 70px);
   gap: 8px;
   align-items: center;
   padding: 6px 4px;
@@ -510,7 +511,7 @@ body {
 
 .au-head, .aurow {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) 84px minmax(180px, 1.6fr) 76px;
+  grid-template-columns: var(--aucols, minmax(130px, 1fr) 84px minmax(180px, 1.6fr) 76px);
   gap: 8px;
   align-items: center;
   padding: 6px 4px;
@@ -518,7 +519,7 @@ body {
 
 .ap-head, .aprow {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) minmax(200px, 2fr) 76px;
+  grid-template-columns: var(--apcols, minmax(130px, 1fr) minmax(200px, 2fr) 76px);
   gap: 8px;
   align-items: center;
   padding: 6px 4px;
@@ -806,11 +807,77 @@ select.input {
 }
 body.col-resizing { cursor: col-resize; user-select: none; }
 
+/* per-column resize grips (makeColsResizable) — absolutely positioned so
+   they never join the header's grid layout */
+.has-grips { position: relative; }
+.col-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+  z-index: 4;
+  touch-action: none;
+}
+.col-grip::before {
+  content: '';
+  position: absolute;
+  top: 15%;
+  bottom: 15%;
+  left: 4px;
+  width: 1px;
+  background: var(--border-strong);
+}
+.col-grip:hover::before, body.col-resizing .col-grip::before {
+  background: var(--accent);
+  width: 2px;
+}
+
+/* floating per-device state-machine window (tracks the timeline cursor) */
+.mwin {
+  position: fixed;
+  width: min(620px, 92vw);
+  height: min(540px, 84vh);
+  min-width: 320px;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.55);
+  resize: both;
+  overflow: hidden;
+}
+.mwin-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px 5px 12px;
+  border-bottom: 1px solid var(--border-strong);
+  cursor: grab;
+  user-select: none;
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+.mwin-head:active { cursor: grabbing; }
+.mwin-title { font-weight: 600; font-size: 12.5px; }
+.mwin-title .mono { font-weight: 400; }
+.mwin-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
 /* events table */
 
 .etable-head, .erow {
   display: grid;
-  grid-template-columns: 56px var(--ts-w, 92px) 62px 160px 130px 130px 1fr;
+  /* #, pkt-in-source, time, proto, type, src, dst, summary — src/dst wide
+     enough for a full MAC; every column user-resizable (--ecols) */
+  grid-template-columns: var(--ecols,
+    56px 64px var(--ts-w, 92px) 62px 160px 150px 150px minmax(120px, 1fr));
   gap: 8px;
   align-items: center;
   padding: 0 8px;
@@ -862,6 +929,7 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 .erow > span { overflow: hidden; text-overflow: ellipsis; }
 .c-idx { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
 .etable-head .c-idx { text-align: right; }
+.c-orig { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
 .c-ts { color: var(--text-2); font-variant-numeric: tabular-nums; }
 .c-type { color: var(--text); }
 .c-src, .c-dst { color: var(--text-2); }
@@ -1161,7 +1229,9 @@ details.history summary {
 
 .dev-head, .dev-row {
   display: grid;
-  grid-template-columns: 150px 132px minmax(140px, 1fr) 56px minmax(120px, auto);
+  /* MAC column sizes to content so addresses are never truncated */
+  grid-template-columns: var(--devcols,
+    150px max-content minmax(140px, 1fr) 56px minmax(120px, auto));
   gap: 8px;
   align-items: center;
   padding: 3px 0;
@@ -1195,7 +1265,7 @@ details.history summary {
 
 .marker-head, .marker-row {
   display: grid;
-  grid-template-columns: minmax(96px, 150px) 1fr 64px 68px;
+  grid-template-columns: var(--mkcols, minmax(96px, 150px) 1fr 64px 68px);
   gap: 8px;
   align-items: center;
   padding: 4px 0;
@@ -1391,6 +1461,9 @@ input.marker-label { width: 100%; }
   margin-bottom: 12px;
 }
 .machine-head { margin-bottom: 8px; }
+/* second machine inside one card (e.g. the MDPdelayResp responder below the
+   initiator) — same look as machine-head but hides when the card collapses */
+.machine-subhead { margin: 12px 0 8px; }
 .machine-title { font-size: 13px; font-weight: 700; }
 .machine-sub { display: block; margin-top: 2px; }
 
