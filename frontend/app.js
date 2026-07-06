@@ -902,22 +902,26 @@ function onEdgePopKey(ev) { if (ev.key === 'Escape') closeEdgePop(); }
    each with its time and a jump-to-packet link */
 function showEdgeTriggers(ev, edge, triggers, def) {
   closeEdgePop();
+  const evName = Array.isArray(edge.label) ? edge.label.join(' ') : (edge.label || '');
   const rows = triggers.map((t) => h('div', { class: 'smpop-row' },
     h('span', { class: 'mono smpop-ts' }, smFmtTime(t.ts)),
-    h('span', { class: 'smpop-why', title: t.why || '' }, t.why || (def && def.title) || ''),
+    h('span', { class: 'smpop-why', title: t.why || '' }, t.why || evName || (def && def.title) || ''),
     (typeof t.n === 'number' && t.n > 0 && smJumpToPacket)
       ? h('button', {
           class: 'linklike mono smpop-pkt', type: 'button',
           onclick: () => { const n = t.n; closeEdgePop(); smJumpToPacket(n); },
         }, 'pkt ' + t.n)
-      : null));
+      : h('span', { class: 'dim mono smpop-nopkt',
+          title: 'not tied to a single packet (timer / derived event)' }, 'timer'));
   const pop = h('div', { class: 'smpop', role: 'dialog' },
     h('div', { class: 'smpop-head' },
       h('span', { class: 'smpop-title' }, String(edge.from) + ' → ' + String(edge.to)),
       h('span', { class: 'smpop-count dim' },
         triggers.length + (triggers.length === 1 ? ' event' : ' events'))),
+    evName ? h('div', { class: 'smpop-evt dim small' },
+      'triggering event: ', h('span', { class: 'mono' }, evName)) : null,
     triggers.length ? h('div', { class: 'smpop-rows' }, rows)
-      : h('div', { class: 'smpop-empty dim small' }, 'not observed yet'));
+      : h('div', { class: 'smpop-empty dim small' }, 'not observed in this capture'));
   document.body.appendChild(pop);
   smEdgePop = pop;
   const r = pop.getBoundingClientRect(), pad = 8;
@@ -1117,6 +1121,10 @@ function drawMachine(container, def, live) {
   }
 
   /* edges under nodes … */
+  /* every transition of a RECONSTRUCTED machine is clickable (occurred → its
+     events, else → its triggering event + "not observed"); pure spec-reference
+     diagrams (def.reference) stay static. */
+  const clickable = !def.reference;
   const paths = [];
   for (const e of def.edges) {
     const pf = pathFor(e);
@@ -1124,7 +1132,7 @@ function drawMachine(container, def, live) {
     const st = edgeState(e);
     const triggers = edgeTriggers.get(String(e.from) + '>' + String(e.to)) || [];
     const el = svg('path', {
-      class: 'sm-edge ' + st + (triggers.length ? ' is-clickable' : ''), d: pf.d,
+      class: 'sm-edge ' + st + (clickable ? ' is-clickable' : ''), d: pf.d,
       'marker-end': 'url(#' + (st === 'is-dim' ? mkDim : mkAcc) + ')',
     });
     gEdges.appendChild(el);
@@ -1161,19 +1169,19 @@ function drawMachine(container, def, live) {
     const w = maxLen * charW + 9, hgt = lines.length * lineH + 3;
     const lx = p.pf.lbl.x, ly = p.pf.lbl.y;
     const bg = svg('rect', {
-      class: 'sm-elabel-bg' + (p.triggers.length ? ' is-clickable' : ''),
+      class: 'sm-elabel-bg' + (clickable ? ' is-clickable' : ''),
       x: lx - w / 2, y: ly - hgt / 2, width: w, height: hgt, rx: 3,
     });
     gLabels.appendChild(bg);
     const text = svg('text', {
-      class: 'sm-elabel ' + p.st + (p.triggers.length ? ' is-clickable' : ''),
+      class: 'sm-elabel ' + p.st + (clickable ? ' is-clickable' : ''),
       x: lx, y: ly, 'text-anchor': 'middle',
     });
     const y0 = ly - (lines.length - 1) * lineH / 2;
     lines.forEach((l, i) => text.appendChild(
       svg('tspan', { x: lx, y: y0 + i * lineH, 'dominant-baseline': 'middle' }, l)));
     gLabels.appendChild(text);
-    if (p.triggers.length) {
+    if (clickable) {
       const onLabel = (ev) => { ev.stopPropagation(); showEdgeTriggers(ev, p.e, p.triggers, def); };
       bg.addEventListener('click', onLabel);
       text.addEventListener('click', onLabel);
@@ -1185,7 +1193,7 @@ function drawMachine(container, def, live) {
   const gHit = svg('g', { class: 'sm-hit' });
   svgEl.appendChild(gHit);
   for (const p of paths) {
-    if (!p.triggers.length) continue;
+    if (!clickable) continue;
     const hit = svg('path', { class: 'sm-hit-path', d: p.pf.d });
     hit.addEventListener('click', (ev) => { ev.stopPropagation(); showEdgeTriggers(ev, p.e, p.triggers, def); });
     hit.addEventListener('mouseenter', () => p.el.classList.add('is-hover'));
@@ -1785,6 +1793,7 @@ function sessionView(app, id) {
     deviceNames: new Map(),  /* mac -> user name || auto entity name */
     timeMode: localStorage.getItem(TIME_MODE_KEY) === 'tod' ? 'tod' : 'rel',
     entityNames: new Map(),
+    srcMap: null,            /* Uint16Array: per-packet source index (combined) */
     packetCache: new Map(),
     progress: null,          /* last WS progress message */
     done: false,             /* analysis finished AND final data refreshed */
@@ -1926,7 +1935,8 @@ function sessionView(app, id) {
      "Machines" tab is folded into here. */
   const tabTopologyBtn = h('button', { id: 'tab-topology', class: 'tab', type: 'button', onclick: () => setTab('topology') }, 'Network Status');
   const inspBody = h('div', { class: 'insp-body' });
-  const eventsPanel = h('div', { class: 'events-panel' }, tableHead, tableBody, tableEmpty);
+  const sourceLegend = h('div', { class: 'source-legend', hidden: true });
+  const eventsPanel = h('div', { class: 'events-panel' }, sourceLegend, tableHead, tableBody, tableEmpty);
   const inspectorPanel = h('div', { class: 'inspector-panel' },
     h('div', { class: 'tabs' }, tabInspBtn, tabStateBtn, tabNotesBtn, tabMarkersBtn, tabInfoBtn, tabTopologyBtn),
     inspBody,
@@ -2061,10 +2071,17 @@ function sessionView(app, id) {
       let cls = 'erow';
       if (i === S.selected) cls += ' sel';
       if (e.kind === 'error') cls += ' iserr';
+      let title = e.summary || '';
+      const si = srcOf(e.n);
+      if (si >= 0) {
+        cls += ' has-src src-c' + (si % 6);
+        const al = srcAlias(si);
+        if (al) title = '⎘ ' + al + '  ·  ' + title;
+      }
       const glyph = e.kind === 'transition'
         ? h('span', { class: 'kg kg-tr' }, '◆ ')
         : (e.kind === 'error' ? h('span', { class: 'kg kg-err' }, '✕ ') : null);
-      frag.appendChild(h('div', { class: cls, dataset: { i: String(i) }, title: e.summary || '' },
+      frag.appendChild(h('div', { class: cls, dataset: { i: String(i) }, title: title },
         h('span', { class: 'c-idx mono' }, i),
         h('span', { class: 'c-ts mono' }, fmtTime(e.ts)),
         h('span', { class: 'c-proto' }, h('span', { class: 'badge ' + protoClass(e.proto) }, e.proto)),
@@ -2246,6 +2263,10 @@ function sessionView(app, id) {
       if (S.closed) return;
       S.infoData = info;
       rebuildDeviceNames();
+      /* combined session: load the per-packet source map so the event table,
+         inspector and history can attribute each packet to its source. */
+      if ((info.sources || []).length > 1 && !S.srcMap) loadSrcMap();
+      renderSourceLegend();
       if (S.tab === 'info') renderInfoTab();
       else if (S.tab === 'topology') renderTopologyTab();
       else if (S.tab === 'inspect') renderInspector();
@@ -2255,6 +2276,42 @@ function sessionView(app, id) {
     } finally {
       S.infoLoading = false;
     }
+  }
+
+  async function loadSrcMap() {
+    try {
+      const res = await fetch(BASE + '/api/sessions/' + encodeURIComponent(id) + '/srcmap',
+        { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      if (!res.ok) return;
+      S.srcMap = new Uint16Array(await res.arrayBuffer());
+      renderSourceLegend();
+      scheduleTable();
+    } catch (err) { /* non-fatal: rows just won't be source-coloured */ }
+  }
+
+  /* source index for packet number n (1-based), or -1 */
+  function srcOf(n) {
+    return (S.srcMap && typeof n === 'number' && n >= 1 && n <= S.srcMap.length)
+      ? S.srcMap[n - 1] : -1;
+  }
+  /* display alias for a source index */
+  function srcAlias(idx) {
+    const srcs = (S.infoData && S.infoData.sources) || [];
+    return srcs[idx] ? (srcs[idx].alias || srcs[idx].name || ('source ' + idx)) : null;
+  }
+
+  /* colour + alias legend above the event table (combined sessions only) */
+  function renderSourceLegend() {
+    const srcs = (S.infoData && S.infoData.sources) || [];
+    if (srcs.length < 2) { sourceLegend.hidden = true; sourceLegend.replaceChildren(); return; }
+    sourceLegend.hidden = false;
+    sourceLegend.replaceChildren(
+      h('span', { class: 'sl-label dim small' }, 'sources:'),
+      ...srcs.map((sc) => h('span', {
+        class: 'sl-item', title: sc.name || sc.pcap_id + ' — rename in Info tab',
+      },
+        h('span', { class: 'sl-dot src-c' + ((sc.index != null ? sc.index : 0) % 6) }),
+        h('span', { class: 'sl-name' }, sc.alias || sc.name || sc.pcap_id))));
   }
 
   /* ────────── selection ────────── */
@@ -4129,6 +4186,8 @@ function sessionView(app, id) {
       if (S.infoData && (S.infoData.sources || [])[index])
         S.infoData.sources[index].alias = alias;
       S.packetCache.clear();   /* badges re-fetch with the new alias */
+      renderSourceLegend();
+      scheduleTable();          /* row tooltips pick up the new alias */
       toast('source alias saved');
     } catch (err) {
       toast('alias save failed: ' + err.message, 'error');

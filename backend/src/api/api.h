@@ -52,6 +52,7 @@ private:
                       HttpResponse&);
     void handleSourceAlias(HttpRequest&, const std::string& id,
                            const std::string& idxStr, HttpResponse&);
+    void handleSrcMap(const std::string& id, HttpResponse&);
     void handleState(const std::string& id, HttpResponse&);
     void handleInfo(const std::string& id, HttpResponse&);
     void handleDeviceNamePut(HttpRequest&, HttpResponse&);

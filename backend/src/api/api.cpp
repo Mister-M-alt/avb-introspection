@@ -146,6 +146,7 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
         if (tail == "info" && m == "GET") return handleInfo(id, resp);
         if (tail.rfind("packets/", 0) == 0 && m == "GET")
             return handlePacket(id, tail.substr(8), resp);
+        if (tail == "srcmap" && m == "GET") return handleSrcMap(id, resp);
         if (tail.rfind("sources/", 0) == 0 && m == "PUT")
             return handleSourceAlias(req, id, tail.substr(8), resp);
     }
@@ -481,6 +482,16 @@ void Api::handlePacket(const std::string& id, const std::string& nStr,
     w.kv("hex", hexDump(bytes));
     w.endObj();
     resp.body = w.take();
+}
+
+void Api::handleSrcMap(const std::string& id, HttpResponse& resp) {
+    if (!mEngine.find(id)) return jsonError(resp, 404, "no such session " + id);
+    std::ifstream f(mStore.sessionSrcMapPath(id), std::ios::binary);
+    if (!f) return jsonError(resp, 404, "session has no source map (single capture)");
+    std::stringstream ss;
+    ss << f.rdbuf();
+    resp.contentType = "application/octet-stream";
+    resp.body = ss.str();
 }
 
 void Api::handleSourceAlias(HttpRequest& req, const std::string& id,
