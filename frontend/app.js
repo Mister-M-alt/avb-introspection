@@ -912,7 +912,7 @@ function showEdgeTriggers(ev, edge, triggers, def) {
           onclick: () => { const n = t.n; closeEdgePop(); smJumpToPacket(n); },
         }, 'pkt ' + t.n)
       : h('span', { class: 'dim mono smpop-nopkt',
-          title: 'not tied to a single packet (timer / derived event)' }, 'timer'));
+          title: 'not tied to a single packet (timer / derived event)' }, 'timer')));
   const pop = h('div', { class: 'smpop', role: 'dialog' },
     h('div', { class: 'smpop-head' },
       h('span', { class: 'smpop-title' }, String(edge.from) + ' → ' + String(edge.to)),
