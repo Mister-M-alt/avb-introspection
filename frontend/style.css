@@ -468,11 +468,11 @@ body {
    inside the panel, so buttons never spill outside the rounded border. */
 .plib-head, .prow {
   display: grid;
-  grid-template-columns: var(--libcols, minmax(120px, 1fr) 64px 128px 116px auto);
+  grid-template-columns: var(--libcols, minmax(120px, 1fr) 64px 128px auto);
   gap: 10px;
   align-items: center;
   padding: 6px 4px;
-  min-width: 520px;
+  min-width: 440px;
 }
 .plib-head {
   position: relative;             /* anchors the resize grips */
@@ -491,7 +491,6 @@ body {
 .prow-chk { flex: none; width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
 .prow-size { text-align: right; white-space: nowrap; }
 .prow-date { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prow-move { max-width: 100%; }
 .prow-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .prow.is-dragging { opacity: 0.5; }
 

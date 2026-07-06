@@ -648,11 +648,6 @@ function homeView(app) {
     title: 'create a library folder to organise captures',
     onclick: () => newFolder(),
   }, 'New folder…');
-  const pathIn = h('input', {
-    class: 'input mono', placeholder: '/data/traces/capture.pcap', spellcheck: 'false',
-    onkeydown: (ev) => { if (ev.key === 'Enter') openPath(); },
-  });
-  const openBtn = h('button', { class: 'btn', type: 'button', onclick: openPath }, 'Open');
 
   const uploadBox = h('div', { class: 'upbox', hidden: true });
   const sessHead = h('div', { class: 'slist-head' },
@@ -675,16 +670,7 @@ function homeView(app) {
   app.appendChild(
     h('div', { class: 'home' },
       metricsBox,
-      h('div', { class: 'home-cols' },
-        pcapPanel,
-        h('section', { class: 'panel' },
-          h('div', { class: 'panel-head' }, h('h2', null, 'Open by server path')),
-          h('div', { class: 'path-row' }, pathIn, openBtn),
-          h('p', { class: 'dim small' },
-            'Path must be visible to the backend (e.g. a mounted volume). pcap and pcapng are accepted, '
-            + 'optionally compressed (.gz .xz .zst .bz2 .lz4 .lz .Z .zip).'),
-        ),
-      ),
+      pcapPanel,
       sessPanel,
     ),
   );
@@ -743,19 +729,6 @@ function homeView(app) {
       uploadError(file.name, err.message);   /* stays until dismissed / next upload */
     } finally {
       uploadBtn.disabled = false;
-    }
-  }
-
-  async function openPath() {
-    const path = pathIn.value.trim();
-    if (!path) { toast('enter a path first', 'error'); return; }
-    openBtn.disabled = true;
-    try {
-      const s = await api('/api/sessions', { method: 'POST', json: { path } });
-      navigate('#/session/' + encodeURIComponent(s.id));
-    } catch (err) {
-      toast('open failed: ' + err.message, 'error');
-      openBtn.disabled = false;
     }
   }
 
@@ -875,18 +848,13 @@ function homeView(app) {
       if (chk.checked) selectedPcaps.add(p.id); else selectedPcaps.delete(p.id);
       updateCombineBar();
     });
-    const move = h('select', {
-      class: 'input input-sm prow-move', title: 'move this capture to a folder',
-    }, h('option', { value: '' }, 'root'),
-      folders.map((f) => h('option', { value: f }, f)));
-    move.value = p.folder || '';
-    move.addEventListener('change', () => movePcap(p.id, move.value));
     const delBtn = role === 'admin' ? h('button', {
       class: 'btn btn-danger btn-sm prow-del', type: 'button',
       title: 'delete this capture from the library (admin)',
       onclick: () => deletePcap(p),
     }, 'Delete') : null;
-    /* grid columns match .plib-head so column widths are resizable together */
+    /* grid columns match .plib-head so column widths are resizable together.
+       Moving between folders is drag-and-drop (onto a folder or “root”). */
     const row = h('div', {
       class: 'prow', draggable: 'true',
       title: 'drag onto a folder (or “root”) to move',
@@ -894,7 +862,6 @@ function homeView(app) {
       h('div', { class: 'prow-name' }, chk, h('span', { class: 'prow-nm', title: p.name }, p.name)),
       h('span', { class: 'prow-size dim mono small' }, fmtBytes(p.size)),
       h('span', { class: 'prow-date dim small' }, fmtDate(p.uploaded_at)),
-      move,
       h('div', { class: 'prow-actions' }, btn, delBtn),
     );
     row.addEventListener('dragstart', (ev) => {
@@ -911,7 +878,6 @@ function homeView(app) {
       h('span', null, 'Name'),
       h('span', { class: 'num' }, 'Size'),
       h('span', null, 'Uploaded'),
-      h('span', null, 'Folder'),
       h('span', null, ''));
   }
 
