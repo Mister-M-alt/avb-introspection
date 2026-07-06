@@ -461,28 +461,39 @@ body {
 .path-row { display: flex; gap: 8px; }
 .path-row .input { flex: 1; }
 
-.plist { display: flex; flex-direction: column; }
+.plist { display: flex; flex-direction: column; overflow-x: auto; }
 
-/* library capture row — flex so the name truncates and the action buttons
-   always stay inside the panel box (never overflow the rounded border) */
-.prow {
-  display: flex;
+/* library table — header + capture rows share one resizable column set
+   (--libcols, written by makeColsResizable). The list scrolls horizontally
+   inside the panel, so buttons never spill outside the rounded border. */
+.plib-head, .prow {
+  display: grid;
+  grid-template-columns: var(--libcols, minmax(120px, 1fr) 64px 128px 116px auto);
+  gap: 10px;
   align-items: center;
-  gap: 8px;
   padding: 6px 4px;
-  border-top: 1px solid var(--border);
-  min-width: 0;
+  min-width: 520px;
 }
+.plib-head {
+  position: relative;             /* anchors the resize grips */
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+  padding-bottom: 4px;
+}
+.plib-head > span { overflow: hidden; text-overflow: ellipsis; }
+.prow > * { min-width: 0; }
+.prow-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.prow-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prow-chk { flex: none; width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
-.prow-name { flex: 1 1 auto; min-width: 40px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.prow-size { flex: none; width: 60px; text-align: right; }
-.prow-date { flex: none; width: 112px; white-space: nowrap; }
-.prow-move { flex: none; max-width: 116px; }
-.prow-analyze, .prow-del { flex: none; }
+.prow-size { text-align: right; white-space: nowrap; }
+.prow-date { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow-move { max-width: 100%; }
+.prow-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .prow.is-dragging { opacity: 0.5; }
-/* tight panels: shed the least-important columns before the buttons squeeze */
-@media (max-width: 1080px) { .prow-date { display: none; } }
-@media (max-width: 940px)  { .prow-move { display: none; } }
 
 /* file-explorer breadcrumb (root › folder) */
 .pexp-crumb {
@@ -508,6 +519,69 @@ body {
 .pexp-seg:hover { background: var(--hover); color: var(--text); }
 .pexp-seg.is-cur { color: var(--text); font-weight: 600; cursor: default; }
 .pexp-sep { color: var(--muted); }
+
+/* upload progress / error box in the pcap panel */
+.upbox {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.upbox-row { display: flex; align-items: center; gap: 10px; }
+.upbox-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.upbox-pct {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.upbox-track {
+  margin-top: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.upbox-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+.upbox.is-proc .upbox-fill { animation: upbox-pulse 1s ease-in-out infinite; }
+@keyframes upbox-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+.upbox.is-error {
+  border-color: rgba(208, 59, 59, 0.5);
+  background: rgba(208, 59, 59, 0.1);
+}
+.upbox-err {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--c-err-text);
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.upbox-x {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.upbox-x:hover { color: var(--text); }
 
 /* folder entry (directory row) — click to open, drop target for moves */
 .pexp-folder {

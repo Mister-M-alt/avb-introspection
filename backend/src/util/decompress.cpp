@@ -125,13 +125,25 @@ bool decompressZip(const std::string& src, const std::string& dst,
         err = "zip archive contains no files";
         return false;
     }
-    std::string entry = entries.front();
-    for (auto& e : entries)
-        if (endsWithCi(e, ".pcap") || endsWithCi(e, ".pcapng") ||
-            endsWithCi(e, ".cap")) {
+    // Ignore macOS archive cruft (__MACOSX/…, ._AppleDouble sidecars) — it is
+    // never the capture and would fail validation if picked.
+    auto isCruft = [](const std::string& e) {
+        if (e.rfind("__MACOSX/", 0) == 0) return true;
+        size_t slash = e.find_last_of('/');
+        std::string base = slash == std::string::npos ? e : e.substr(slash + 1);
+        return base.rfind("._", 0) == 0 || base == ".DS_Store";
+    };
+    std::string entry;
+    for (auto& e : entries)   // 1st choice: a capture-typed, non-cruft entry
+        if (!isCruft(e) && (endsWithCi(e, ".pcap") || endsWithCi(e, ".pcapng") ||
+                            endsWithCi(e, ".cap"))) {
             entry = e;
             break;
         }
+    if (entry.empty())        // else: the first non-cruft file
+        for (auto& e : entries)
+            if (!isCruft(e)) { entry = e; break; }
+    if (entry.empty()) entry = entries.front();
     if (!runRedirect({"unzip", "-p", src, entry}, "", dst, err)) {
         if (err.find("not installed") == std::string::npos)
             err = "failed to extract \"" + entry + "\" from the zip archive";

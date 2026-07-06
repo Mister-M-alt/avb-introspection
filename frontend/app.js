@@ -321,6 +321,39 @@ async function api(path, opts) {
   return body;
 }
 
+/* Upload a file with progress. fetch() cannot report upload progress, so use
+   XMLHttpRequest. onProgress(fraction|null, sent, total, sendingDone) fires as
+   bytes go out (fraction null when the length is unknown); once the last byte
+   is sent it fires with sendingDone=true so the UI can show "processing" while
+   the server validates/decompresses. Resolves with parsed JSON, or rejects
+   with an Error carrying the server's {error} message when present. */
+function uploadWithProgress(path, file, contentType, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', BASE + path);
+    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+    xhr.upload.addEventListener('progress', (ev) => {
+      if (onProgress) onProgress(ev.lengthComputable ? ev.loaded / ev.total : null,
+        ev.loaded, ev.total, false);
+    });
+    xhr.upload.addEventListener('load', () => {
+      if (onProgress) onProgress(1, file.size, file.size, true);
+    });
+    xhr.addEventListener('load', () => {
+      let body = null;
+      try { body = JSON.parse(xhr.responseText); } catch (e) { body = null; }
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(body); return; }
+      if (xhr.status === 401) { authLost(); reject(new Error('session expired — please log in again')); return; }
+      reject(new Error((body && body.error) ? body.error
+        : (xhr.status ? xhr.status + ' ' + (xhr.statusText || 'upload failed') : 'upload failed')));
+    });
+    xhr.addEventListener('error', () => reject(new Error('network error — backend unreachable')));
+    xhr.addEventListener('abort', () => reject(new Error('upload cancelled')));
+    xhr.send(file);
+  });
+}
+
 async function doLogout() {
   try { await api('/api/logout', { method: 'POST' }); } catch (err) { /* best effort */ }
   setAuth('', '');
@@ -621,6 +654,7 @@ function homeView(app) {
   });
   const openBtn = h('button', { class: 'btn', type: 'button', onclick: openPath }, 'Open');
 
+  const uploadBox = h('div', { class: 'upbox', hidden: true });
   const sessHead = h('div', { class: 'slist-head' },
     h('span', null, 'Name'), h('span', null, 'Status'), h('span', { class: 'num' }, 'Packets'),
     h('span', { class: 'num' }, 'Events'), h('span', { class: 'num' }, 'Errors'),
@@ -631,16 +665,18 @@ function homeView(app) {
     sessHead,
     sessList,
   );
+  const pcapPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head', id: 'pcap-panel-head' },
+      h('h2', null, 'Uploaded pcaps'), newFolderBtn, uploadBtn, fileIn),
+    uploadBox,
+    combineBar,
+    pcapList,
+  );
   app.appendChild(
     h('div', { class: 'home' },
       metricsBox,
       h('div', { class: 'home-cols' },
-        h('section', { class: 'panel' },
-          h('div', { class: 'panel-head', id: 'pcap-panel-head' },
-            h('h2', null, 'Uploaded pcaps'), newFolderBtn, uploadBtn, fileIn),
-          combineBar,
-          pcapList,
-        ),
+        pcapPanel,
         h('section', { class: 'panel' },
           h('div', { class: 'panel-head' }, h('h2', null, 'Open by server path')),
           h('div', { class: 'path-row' }, pathIn, openBtn),
@@ -654,22 +690,59 @@ function homeView(app) {
   );
   makeColsResizable(sessHead, sessPanel, '--sesscols', 'sessions');
 
+  /* progress bar / processing state / persistent error, shown in-panel */
+  function uploadShow(name) {
+    uploadBox.hidden = false;
+    uploadBox.className = 'upbox';
+    uploadBox.replaceChildren(
+      h('div', { class: 'upbox-row' },
+        h('span', { class: 'upbox-name', title: name }, name),
+        h('span', { class: 'upbox-pct' }, '0%')),
+      h('div', { class: 'upbox-track' }, h('div', { class: 'upbox-fill' })));
+  }
+  function uploadProgress(frac, done) {
+    const fill = uploadBox.querySelector('.upbox-fill');
+    const pct = uploadBox.querySelector('.upbox-pct');
+    if (!fill || !pct) return;
+    if (done || frac == null) {
+      fill.style.width = '100%';
+      uploadBox.classList.add('is-proc');
+      pct.textContent = 'processing…';   /* server validating / decompressing */
+    } else {
+      const p = Math.round(frac * 100);
+      fill.style.width = p + '%';
+      pct.textContent = p + '%';
+    }
+  }
+  function uploadHide() { uploadBox.hidden = true; uploadBox.replaceChildren(); }
+  function uploadError(name, msg) {
+    uploadBox.hidden = false;
+    uploadBox.className = 'upbox is-error';
+    uploadBox.replaceChildren(
+      h('div', { class: 'upbox-row' },
+        h('span', { class: 'upbox-err' }, '✕ ' + name + ' — ' + msg),
+        h('button', {
+          class: 'upbox-x', type: 'button', title: 'dismiss', onclick: uploadHide,
+        }, '✕')));
+  }
+
   /* upload only adds to the library — the user starts analysis explicitly
      (Analyze / Combine), so bulk uploads don't open a session per file */
   async function uploadFile(file) {
     uploadBtn.disabled = true;
-    uploadBtn.textContent = 'Uploading…';
+    uploadShow(file.name);
     try {
-      await api('/api/pcaps?name=' + encodeURIComponent(file.name), {
-        method: 'POST', body: file, contentType: 'application/octet-stream',
-      });
+      await uploadWithProgress('/api/pcaps?name=' + encodeURIComponent(file.name),
+        file, 'application/octet-stream',
+        (frac, sent, total, done) => uploadProgress(frac, done));
+      uploadHide();
       toast('uploaded ' + file.name);
+      pcapCwd = '';   /* uploads land in the root — show it so it's visible */
       refresh();
     } catch (err) {
-      toast('upload failed: ' + err.message, 'error');
+      uploadError(file.name, err.message);   /* stays until dismissed / next upload */
     } finally {
       uploadBtn.disabled = false;
-      uploadBtn.textContent = 'Upload pcap…';
     }
   }
 
@@ -813,17 +886,16 @@ function homeView(app) {
       title: 'delete this capture from the library (admin)',
       onclick: () => deletePcap(p),
     }, 'Delete') : null;
+    /* grid columns match .plib-head so column widths are resizable together */
     const row = h('div', {
       class: 'prow', draggable: 'true',
       title: 'drag onto a folder (or “root”) to move',
     },
-      chk,
-      h('span', { class: 'prow-name', title: p.name }, p.name),
+      h('div', { class: 'prow-name' }, chk, h('span', { class: 'prow-nm', title: p.name }, p.name)),
       h('span', { class: 'prow-size dim mono small' }, fmtBytes(p.size)),
       h('span', { class: 'prow-date dim small' }, fmtDate(p.uploaded_at)),
       move,
-      btn,
-      delBtn,
+      h('div', { class: 'prow-actions' }, btn, delBtn),
     );
     row.addEventListener('dragstart', (ev) => {
       ev.dataTransfer.setData('text/pcap-id', p.id);
@@ -832,6 +904,15 @@ function homeView(app) {
     });
     row.addEventListener('dragend', () => row.classList.remove('is-dragging'));
     return row;
+  }
+
+  function libHeader() {
+    return h('div', { class: 'plib-head' },
+      h('span', null, 'Name'),
+      h('span', { class: 'num' }, 'Size'),
+      h('span', null, 'Uploaded'),
+      h('span', null, 'Folder'),
+      h('span', null, ''));
   }
 
   function folderRow(name, list) {
@@ -905,20 +986,23 @@ function homeView(app) {
     }
 
     const out = [crumbBar()];
-    if (!pcapCwd) {
-      for (const f of folders) out.push(folderRow(f, byFolder.get(f) || []));
-      const rootList = byFolder.get('');
-      for (const p of rootList) out.push(pcapRow(p, folders));
-      if (!folders.length && !rootList.length)
-        out.push(h('div', { class: 'empty small' }, 'Empty library.'));
-    } else {
-      const list = byFolder.get(pcapCwd) || [];
-      if (!list.length)
-        out.push(h('div', { class: 'empty small' },
-          'This folder is empty — drag captures onto it, or use a row’s move menu.'));
-      for (const p of list) out.push(pcapRow(p, folders));
+    let header = null;
+    const files = pcapCwd ? (byFolder.get(pcapCwd) || []) : byFolder.get('');
+    if (!pcapCwd) for (const f of folders) out.push(folderRow(f, byFolder.get(f) || []));
+    if (files.length) {
+      header = libHeader();
+      out.push(header);
+      for (const p of files) out.push(pcapRow(p, folders));
+    } else if (pcapCwd) {
+      out.push(h('div', { class: 'empty small' },
+        'This folder is empty — drag captures onto it, or use a row’s move menu.'));
+    } else if (!folders.length) {
+      out.push(h('div', { class: 'empty small' }, 'Empty library.'));
     }
     pcapList.replaceChildren(...out);
+    /* header is in the DOM now — make the columns drag-resizable (shared
+       widths across every capture row via the --libcols variable) */
+    if (header) makeColsResizable(header, pcapPanel, '--libcols', 'library');
     updateCombineBar();
   }
 
