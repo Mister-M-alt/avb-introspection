@@ -1879,7 +1879,14 @@ input.marker-label { width: 100%; }
 .topo-scroll { padding: 2px 0 8px; }
 .topo-graph { position: relative; min-height: 40px; }
 
-.topo-svg { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+/* The edge layer sits behind the device cards (z-index:1), so cards stay
+   clickable. The svg keeps default pointer-events (only painted shapes are
+   hit, transparent areas fall through). Firefox won't honour a child's
+   pointer-events:auto under a pointer-events:none svg, so instead the
+   non-interactive shapes (link paths) opt out and only the link labels
+   remain grabbable. */
+.topo-svg { position: absolute; inset: 0; overflow: visible; }
+.topo-svg .topo-edge { pointer-events: none; }
 
 /* device cards float over the edge layer */
 .topo-node {
@@ -1957,6 +1964,12 @@ input.marker-label { width: 100%; }
 .topo-elabel { font: 600 9px var(--mono); }
 .topo-elabel.is-sync { fill: var(--c-gptp); }
 .topo-elabel.is-stream, .topo-elabel.is-binding { fill: var(--c-acmp); }
+/* the label doubles as a drag handle: it must take pointer events even though
+   the edge SVG as a whole is click-through */
+.topo-elabel-grip { pointer-events: auto; cursor: grab; }
+.topo-elabel-grip:hover .topo-elabel-bg { stroke: var(--accent); stroke-width: 1; }
+.topo-elabel-grip.is-dragging { cursor: grabbing; }
+.topo-elabel-grip.is-dragging .topo-elabel-bg { stroke: var(--accent); stroke-width: 1.2; }
 
 /* per-device machines panel below the graph */
 .topo-panel-host { display: block; }

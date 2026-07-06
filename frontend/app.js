@@ -3950,10 +3950,31 @@ function sessionView(app, id) {
     try { localStorage.setItem(TOPO_POS_KEY, JSON.stringify(all)); } catch (err) { /* quota */ }
     if (topoResetBtn) topoResetBtn.disabled = false;
   }
-  function topoHasSavedPos() { return Object.keys(topoLoadPos()).length > 0; }
+  function topoHasSavedPos() {
+    return Object.keys(topoLoadPos()).length > 0 || Object.keys(topoLoadBends()).length > 0;
+  }
   function topoResetPos() {
     localStorage.removeItem(TOPO_POS_KEY);
+    localStorage.removeItem(TOPO_BEND_KEY);
     renderTopologyTab();
+  }
+
+  /* per-link curvature + label position: a control-point offset {dx,dy} from
+     the midpoint of the two device centres, keyed by the edge identity, so it
+     survives node drags and cursor scrubbing. Dragging a link's label moves
+     this control point — the curve bows toward it, separating overlapping
+     links so you can see what's going on. */
+  const TOPO_BEND_KEY = 'avb.topoBend.' + id;
+  function topoLoadBends() {
+    try { return JSON.parse(localStorage.getItem(TOPO_BEND_KEY) || '{}') || {}; }
+    catch (err) { return {}; }
+  }
+  function edgeKey(e) { return e.kind + '|' + e.from + '|' + e.to + '|' + (e.label || ''); }
+  function topoSaveBend(key, dx, dy) {
+    const all = topoLoadBends();
+    all[key] = { dx: Math.round(dx), dy: Math.round(dy) };
+    try { localStorage.setItem(TOPO_BEND_KEY, JSON.stringify(all)); } catch (err) { /* quota */ }
+    if (topoResetBtn) topoResetBtn.disabled = false;
   }
 
   /* drag a device card to rearrange the graph; edges follow live and the
@@ -4519,36 +4540,86 @@ function sessionView(app, id) {
     svgEl.appendChild(svg('defs', null,
       topoMarker('topo-arr-sync', PROTO_COLORS.GPTP),
       topoMarker('topo-arr-stream', PROTO_COLORS.ACMP)));
+    const bends = topoLoadBends();
     for (const e of edges) {
       const A = boxes.get(e.from), B = boxes.get(e.to);
       if (!A || !B) continue;
-      const a = topoBorderPt(A, B.cx, B.cy);
-      const b = topoBorderPt(B, A.cx, A.cy);
-      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-      const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
-      /* bow streams/bindings off any sync line (and off each other) */
-      const off = e.kind === 'stream' ? 18 : e.kind === 'binding' ? 32 : 0;
-      const cx = mx - dy / len * off, cy = my + dx / len * off;
+      const key = edgeKey(e);
       const cls = e.kind === 'sync' ? 'is-sync' : e.kind === 'binding' ? 'is-binding' : 'is-stream';
-      svgEl.appendChild(svg('path', {
-        class: 'topo-edge ' + cls,
-        d: 'M ' + a.x + ' ' + a.y + ' Q ' + cx + ' ' + cy + ' ' + b.x + ' ' + b.y,
-        'marker-end': 'url(#' + (e.kind === 'sync' ? 'topo-arr-sync' : 'topo-arr-stream') + ')',
-      }));
-      if (e.label) {
-        const lx = off ? cx : mx, ly = off ? cy : my;
-        const txt = String(e.label);
-        const w = txt.length * 5.6 + 8;
-        svgEl.appendChild(svg('rect', {
-          class: 'topo-elabel-bg', x: lx - w / 2, y: ly - 7, width: w, height: 14, rx: 3,
-        }));
-        svgEl.appendChild(svg('text', {
-          class: 'topo-elabel ' + cls,
-          x: lx, y: ly, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
-        }, txt));
+      const arrow = 'url(#' + (e.kind === 'sync' ? 'topo-arr-sync' : 'topo-arr-stream') + ')';
+      /* default control-point offset from the centre-midpoint: perpendicular to
+         the link, bowing streams/bindings clear of any straight sync line */
+      const mcx = (A.cx + B.cx) / 2, mcy = (A.cy + B.cy) / 2;
+      const ddx = B.cx - A.cx, ddy = B.cy - A.cy, dlen = Math.hypot(ddx, ddy) || 1;
+      const off = e.kind === 'stream' ? 18 : e.kind === 'binding' ? 32 : 0;
+      const def = { dx: -ddy / dlen * off, dy: ddx / dlen * off };
+      const bend = bends[key] || def;
+
+      const path = svg('path', { class: 'topo-edge ' + cls, 'marker-end': arrow });
+      svgEl.appendChild(path);
+      const txt = e.label ? String(e.label) : '';
+      const w = txt.length * 5.6 + 12;
+      let rect = null, text = null, grip = null;
+      if (txt) {
+        rect = svg('rect', { class: 'topo-elabel-bg', width: w, height: 16, rx: 3 });
+        text = svg('text', { class: 'topo-elabel ' + cls, 'text-anchor': 'middle', 'dominant-baseline': 'middle' }, txt);
+        /* the label doubles as the drag handle for the curvature */
+        grip = svg('g', { class: 'topo-elabel-grip', title: 'drag to move this link and bend its curve' }, rect, text);
+        svgEl.appendChild(grip);
       }
+
+      /* recompute the path + label from the current control-point offset */
+      const geom = { A, B, bend: { dx: bend.dx, dy: bend.dy } };
+      const layout = () => {
+        const cx = mcx + geom.bend.dx, cy = mcy + geom.bend.dy;
+        /* border exit points aim at the control point, so a bowed link leaves
+           the cards cleanly toward its curve */
+        const a = topoBorderPt(geom.A, cx, cy);
+        const bp = topoBorderPt(geom.B, cx, cy);
+        path.setAttribute('d', 'M ' + a.x + ' ' + a.y + ' Q ' + cx + ' ' + cy + ' ' + bp.x + ' ' + bp.y);
+        if (text) {
+          /* label sits on the curve's apex (t=0.5 of the quadratic) */
+          const lx = 0.25 * a.x + 0.5 * cx + 0.25 * bp.x;
+          const ly = 0.25 * a.y + 0.5 * cy + 0.25 * bp.y;
+          rect.setAttribute('x', lx - w / 2); rect.setAttribute('y', ly - 8);
+          text.setAttribute('x', lx); text.setAttribute('y', ly);
+        }
+      };
+      layout();
+
+      if (grip) topoLabelDrag(grip, geom, key, mcx, mcy, layout);
     }
     graph.insertBefore(svgEl, graph.firstChild);
+  }
+
+  /* drag a link's label to move it and bend the link's curve; the offset is
+     stored per session so it survives scrubbing and node moves */
+  function topoLabelDrag(grip, geom, key, mcx, mcy, layout) {
+    grip.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const gr = topoGraphEl ? topoGraphEl.getBoundingClientRect() : grip.ownerSVGElement.getBoundingClientRect();
+      let moved = false;
+      grip.classList.add('is-dragging');
+      const move = (e2) => {
+        moved = true;
+        /* control point = pointer position in graph coords; the curve's apex
+           (label) tracks halfway to it, so drop the label roughly where the
+           pointer is by placing the control point twice as far out */
+        const px = e2.clientX - gr.left, py = e2.clientY - gr.top;
+        geom.bend.dx = (px - mcx) * 2;
+        geom.bend.dy = (py - mcy) * 2;
+        layout();
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        grip.classList.remove('is-dragging');
+        if (moved) topoSaveBend(key, geom.bend.dx, geom.bend.dy);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
   }
 
   function topoLegend() {
@@ -4556,7 +4627,7 @@ function sessionView(app, id) {
       h('span', { class: 'tl-item' }, h('span', { class: 'tl-line tl-sync' }), 'gPTP sync (master → slave)'),
       h('span', { class: 'tl-item' }, h('span', { class: 'tl-line tl-stream' }), 'stream (talker → listener)'),
       h('span', { class: 'tl-item' }, h('span', { class: 'tl-line tl-binding' }), 'ACMP binding (bound, no stream)'),
-      h('span', { class: 'tl-item dim' }, 'drag a device card to rearrange'));
+      h('span', { class: 'tl-item dim' }, 'drag a device card to rearrange · drag a link label to bend it'));
   }
 
   function renderTopologyTab() {
