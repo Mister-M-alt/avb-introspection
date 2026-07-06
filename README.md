@@ -87,6 +87,48 @@ docker run -p 8342:8342 -v avb-data:/data avb-introspection
 Uploaded pcaps, sessions and user accounts persist in the `/data` volume and
 survive restarts (BE-8).
 
+## Using the app
+
+A quick tour of the web UI. On a fresh install the first account you create
+becomes the administrator (or provision one with `AVB_ADMIN_USER` /
+`AVB_ADMIN_PASSWORD`).
+
+**Home — the pcap library.** *Upload pcap…* adds a capture (plain or
+compressed: `.gz .xz .zst .bz2 .lz4 .lz .zip`). The library is a file
+explorer: make folders with *New folder…*, open a folder to browse it, and
+move a capture by **dragging its row** onto a folder (or the **root**
+breadcrumb). Column widths are drag-resizable. Press **Analyze** on a capture
+to start a session, or tick several and **Combine** them into one merged
+timeline. Admins can **Delete** a capture (existing sessions keep their own
+copy). Below the library, *Analysis sessions* lists your sessions — click one
+to open it.
+
+**A session — events, timeline, inspector.** The left pane is the event table
+(**#** = event index, **Pkt** = number in the original pcap) over a per-protocol
+**timeline**. Filter with the protocol/kind chips and the search box; click a
+row — or a point on the timeline — to select an event. Everything time-aware
+re-times to that moment (the "as of" cursor). The right pane's tabs:
+
+- **Packet inspector** — the selected packet fully decoded, layer by layer.
+- **State** — every reconstructed protocol object with its transition history.
+  Each transition links to what caused it: **pkt N** (the causing packet) or
+  **◆ #i** (a timer/derived state event) — click to jump straight there, even
+  if the current filter would otherwise hide it.
+- **Network Status** — the observed topology plus every state machine as a live
+  spec diagram, overlaid with the state at the cursor. **Drag a device card**
+  to rearrange the graph; **drag a link's label** to bend its curve (to
+  separate overlapping links); **click a stream's label** to jump to its ACMP
+  connection machine. Click any **transition** in a diagram to list the
+  event(s) that drove it. Each device has a **⧉ window** button that opens its
+  machines in a separate, cursor-tracking browser window. *Reset layout* undoes
+  manual moves and bends.
+- **Notes** — markdown investigation notes (autosaved, conflict-safe for
+  concurrent editors). **Markers** — your own timeline bookmarks. **Info** —
+  capture/file/session details and per-device naming.
+
+**Admin** (admins only) — user management, live presence, and a **Storage**
+panel to change where the pcap library is kept on disk.
+
 ## Architecture
 
 ```
