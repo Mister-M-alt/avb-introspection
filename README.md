@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Kebag-Logic -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # AVB Introspection
 
 A Milan-oriented introspection tool for AVB/TSN control protocols: it decodes
@@ -26,16 +29,44 @@ linking straight to its triggering packet.
 
 The tool is an *observer* — it decodes and correlates traffic; generating
 traffic is [TSN-GEN]'s job. See [REQUIREMENTS.md](REQUIREMENTS.md) for the
-full requirements and [docs/API.md](docs/API.md) for the API contract.
+full requirements, [docs/API.md](docs/API.md) for the API contract, and
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the deployment guide.
+
+## Screenshots
+
+The pcap library — a file-explorer with folders (drag-and-drop, resizable
+columns); compressed captures (`.gz .xz .zst .bz2 .lz4 .lz .zip`) are inflated
+on upload:
+
+![Home — pcap library and analysis sessions](docs/img/home.png)
+
+A session: filterable event table + timeline on the left, the packet inspector
+with fully decoded protocol layers on the right:
+
+![Session — event table, timeline and packet inspector](docs/img/session-inspector.png)
+
+**Network Status** — the observed topology plus every reconstructed state
+machine as a live spec diagram, overlaid with the state *as of the timeline
+cursor* (here the gPTP domain grandmaster / BMCA lifecycle):
+
+![Network Status — topology and live state machines](docs/img/network-status.png)
+
+Each machine is a spec diagram with the observed *current* state highlighted and
+every taken transition traced — click a transition to jump to the packet or
+event that drove it:
+
+![ADP entity lifecycle state machine](docs/img/state-machine.png)
 
 ## Quick start
 
 Dependencies: `g++` (C++20), `make`, `zlib`, `libsodium` (and Python 3 for
-the test-data generator).
+the test-data generator). See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for
+Docker and systemd + nginx deployments.
 
 ```bash
 make -j                       # -> build/avb-introspectd
-./build/avb-introspectd       # listens on :8342, data in ./data
+AVB_ADMIN_USER=admin AVB_ADMIN_PASSWORD=change-me \
+  ./build/avb-introspectd     # listens on :8342, data in ./data
 ```
 
 Open http://localhost:8342 in Firefox, register an account, upload a pcap
@@ -209,5 +240,16 @@ For bare metal, point the upstream in `deploy/nginx.conf` at
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Runtime dependencies: zlib (zlib licence),
-libsodium (ISC); vendored TSN-GEN headers (MIT, Kebag-Logic).
+**MIT** — see [LICENSE](LICENSE). Every source file carries an SPDX header
+(`SPDX-License-Identifier: MIT`, `SPDX-FileCopyrightText: 2026 Kebag-Logic`),
+so the licensing is machine-checkable:
+
+```bash
+grep -rL SPDX-License-Identifier \
+  $(git ls-files '*.cpp' '*.h' '*.js' '*.css' '*.html' '*.md' \
+                 '*.py' '*.sh' Makefile Dockerfile 'deploy/*')
+# (no output = every file is covered)
+```
+
+Runtime dependencies keep their own licences: zlib (zlib licence), libsodium
+(ISC); the vendored TSN-GEN headers are MIT (Kebag-Logic).

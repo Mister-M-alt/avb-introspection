@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Kebag-Logic -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # AVB Introspection — Backend API contract (v1, frozen)
 
 Base URL: the backend serves everything from one port (default `8342`).

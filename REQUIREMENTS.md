@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Kebag-Logic -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # AVB Introspection — Requirements
 
 **Status:** Draft v0.3 (open questions resolved, see §8) — **Date:** 2026-07-02

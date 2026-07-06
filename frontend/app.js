@@ -1,5 +1,11 @@
-/* AVB Introspection — frontend. Vanilla ES2022, no dependencies, works offline.
-   Talks to the backend API described in docs/API.md via relative URLs. */
+/*
+ * SPDX-FileCopyrightText: 2026 Kebag-Logic
+ * SPDX-License-Identifier: MIT
+ *
+ * AVB Introspection — frontend. Vanilla ES2022, no dependencies, works
+ * offline. Talks to the backend API described in docs/API.md via relative
+ * URLs.
+ */
 (() => {
 'use strict';
 
