@@ -165,3 +165,58 @@ TEST(decompress_zip_extracts_capture) {
                     std::istreambuf_iterator<char>());
     CHECK_EQ(got, std::string("PCAP-BYTES-HERE"));
 }
+
+#include "sec/flowguard.h"
+#include "store/store.h"
+#include "util/ratelimit.h"
+
+TEST(rate_limiter_burst_then_deny) {
+    RateLimiter rl;
+    // burst of 5 at 1 token/s: five pass, the sixth is denied with a
+    // retry hint under a second.
+    double retry = -1;
+    for (int i = 0; i < 5; ++i) CHECK(rl.allow("u:a", 1.0, 5.0));
+    CHECK(!rl.allow("u:a", 1.0, 5.0, 1.0, &retry));
+    CHECK(retry > 0 && retry <= 1.1);
+    // Other actors have their own bucket, penalties slow the refill hint.
+    CHECK(rl.allow("u:b", 1.0, 5.0));
+    for (int i = 0; i < 5; ++i) rl.allow("u:c", 1.0, 5.0);
+    double slow = -1;
+    CHECK(!rl.allow("u:c", 1.0, 5.0, 4.0, &slow));
+    CHECK(slow > 3.0); // 4x penalty divides the refill rate
+}
+
+TEST(flowguard_bruteforce_alert_and_penalty) {
+    FlowGuard g; // no log path — memory only
+    // Normal traffic stays legit and unpenalized.
+    g.record("u:ok", "default", "user", "GET", "/api/sessions", 200, 0);
+    CHECK_EQ(g.penalty("u:ok"), 1.0);
+    // 8 login failures inside the window raise auth-bruteforce + penalty.
+    for (int i = 0; i < 8; ++i)
+        g.record("ip:10.0.0.9", "(unauthenticated)", "", "POST", "/api/login",
+                 401, 0);
+    CHECK_EQ(g.penalty("ip:10.0.0.9"), 4.0);
+    // A traversal probe is flagged immediately, first strike.
+    g.record("u:evil", "default", "user", "GET", "/api/../../etc/passwd", 403,
+             0);
+    CHECK_EQ(g.penalty("u:evil"), 4.0);
+    JsonWriter w;
+    g.snapshot(w);
+    std::string snap = w.take();
+    CHECK(snap.find("auth-bruteforce") != std::string::npos);
+    CHECK(snap.find("path-traversal") != std::string::npos);
+    CHECK(snap.find("\"suspect\"") != std::string::npos);
+}
+
+TEST(store_domain_id_validation) {
+    CHECK(Store::validDomainId("acme"));
+    CHECK(Store::validDomainId("team-42"));
+    CHECK(!Store::validDomainId(""));
+    CHECK(!Store::validDomainId("Acme"));       // uppercase
+    CHECK(!Store::validDomainId("42team"));     // must start with a letter
+    CHECK(!Store::validDomainId("a/b"));        // path separator
+    CHECK(!Store::validDomainId("a.b"));        // no dots (path safety)
+    CHECK(!Store::validDomainId("default"));    // reserved
+    CHECK(!Store::validDomainId("domains"));    // reserved (layout)
+    CHECK(!Store::validDomainId(std::string(33, 'a'))); // too long
+}

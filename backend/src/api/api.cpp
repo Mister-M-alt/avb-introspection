@@ -88,7 +88,51 @@ std::string baseName(const std::string& path) {
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+/** Client IP for rate limiting / flow monitoring. Behind the nginx proxy the
+ *  socket peer is always the proxy — trust X-Real-IP only when the
+ *  connection actually comes from localhost (a remote client cannot spoof
+ *  its way past the limiter by sending the header directly). */
+std::string clientIp(const HttpRequest& req) {
+    std::string sock = req.clientAddr;
+    size_t colon = sock.find(':');
+    if (colon != std::string::npos) sock.resize(colon);
+    if (sock == "127.0.0.1") {
+        std::string real = req.header("x-real-ip");
+        if (!real.empty() && real.size() <= 45) return real;
+    }
+    return sock;
+}
+
+double envDouble(const char* name, double dflt) {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return dflt;
+    char* end = nullptr;
+    double d = std::strtod(v, &end);
+    return end && *end == '\0' ? d : dflt;
+}
+
+void tooMany(HttpResponse& resp, double retryAfter) {
+    int ra = (int)retryAfter + 1;
+    resp.extraHeaders.emplace_back("Retry-After", std::to_string(ra));
+    jsonError(resp, 429,
+              "rate limit exceeded — retry in " + std::to_string(ra) + " s");
+}
+
 } // namespace
+
+Api::Api(Engine& engine, Auth& auth, Store& store, ThreadPool& pool,
+         ClientRegistry& clients, std::string frontendDir)
+    : mEngine(engine), mAuth(auth), mStore(store), mPool(pool),
+      mClients(clients), mFrontendDir(std::move(frontendDir)),
+      mStart(std::chrono::steady_clock::now()) {
+    mRateRps = envDouble("AVB_RATE_RPS", 30.0);
+    mRateBurst = envDouble("AVB_RATE_BURST", 90.0);
+    mLoginRps = envDouble("AVB_LOGIN_RPS", 0.5);
+    mLoginBurst = envDouble("AVB_LOGIN_BURST", 6.0);
+    const char* noReg = std::getenv("AVB_DISABLE_REGISTRATION");
+    mRegistrationDisabled = noReg && *noReg && std::string(noReg) != "0";
+    mGuard.init(store.dataDir() + "/security.log");
+}
 
 void Api::handle(HttpRequest& req, HttpResponse& resp,
                  std::shared_ptr<ClientInfo> client) {
@@ -101,6 +145,24 @@ void Api::handle(HttpRequest& req, HttpResponse& resp,
 
 void Api::handleApi(HttpRequest& req, HttpResponse& resp,
                     std::shared_ptr<ClientInfo> client) {
+    // Captured before routing: upload handlers move the body away.
+    uint64_t bytesIn = req.body.size();
+    std::string method = req.method, path = req.path;
+    std::string ip = clientIp(req);
+
+    std::string actor = "ip:" + ip; // refined to "u:<user>" once authed
+    Caller c;
+    routeApi(req, resp, client, ip, actor, c);
+
+    // Every API request feeds the flow monitor + per-domain traffic counters
+    // (SE-7) — including rejected ones; failure patterns are the signal.
+    trafficHit(c.domain.empty() ? "(unauthenticated)" : c.domain);
+    mGuard.record(actor, c.domain, c.role, method, path, resp.status, bytesIn);
+}
+
+void Api::routeApi(HttpRequest& req, HttpResponse& resp,
+                   std::shared_ptr<ClientInfo> client, const std::string& ip,
+                   std::string& actor, Caller& c) {
     const std::string& p = req.path;
     const std::string& m = req.method;
 
@@ -113,14 +175,39 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
         resp.body = w.take();
         return;
     }
-    if (p == "/api/register" && m == "POST") return handleRegister(req, resp);
-    if (p == "/api/login" && m == "POST") return handleLogin(req, resp);
+    if ((p == "/api/register" || p == "/api/login") && m == "POST") {
+        // Brute-force protection: per-IP bucket, tightened further while the
+        // flow guard flags the address (SE-6/SE-7).
+        double retry = 0;
+        if (!mLimiter.allow("ip:" + ip, mLoginRps, mLoginBurst,
+                            mGuard.penalty("ip:" + ip), &retry))
+            return tooMany(resp, retry);
+        if (p == "/api/register") return handleRegister(req, resp);
+        return handleLogin(req, resp);
+    }
 
     // Everything else requires a valid token (SE-3).
     std::string token = bearerToken(req);
     std::string user = mAuth.check(token);
     if (user.empty()) return jsonError(resp, 401, "missing or invalid token");
     if (client) client->setUser(user);
+    Auth::UserInfo info = mAuth.infoOf(user);
+    c = {user, info.role, info.domain.empty() ? "default" : info.domain};
+    actor = "u:" + user;
+
+    // SE-6: admins are exempt; everyone else takes from a general per-user
+    // bucket, and expensive operations (upload, analysis start) from a much
+    // smaller one. The flow-guard penalty throttles flagged actors harder.
+    if (!c.admin()) {
+        double pen = mGuard.penalty(actor), retry = 0;
+        if (!mLimiter.allow(actor, mRateRps, mRateBurst, pen, &retry))
+            return tooMany(resp, retry);
+        bool expensive = (p == "/api/pcaps" || p == "/api/sessions") &&
+                         m == "POST";
+        if (expensive &&
+            !mLimiter.allow("op:" + user, 0.2, 8, pen, &retry))
+            return tooMany(resp, retry);
+    }
 
     if (p == "/api/logout" && m == "POST") {
         mAuth.logout(token);
@@ -129,48 +216,69 @@ void Api::handleApi(HttpRequest& req, HttpResponse& resp,
     }
     if (p == "/api/me" && m == "GET") {
         JsonWriter w;
-        w.beginObj().kv("username", user).kv("role", mAuth.roleOf(user)).endObj();
+        w.beginObj().kv("username", user).kv("role", c.role)
+            .kv("domain", c.domain)
+            .kv("domain_owner", mStore.domainOwner(c.domain) == user)
+            .endObj();
         resp.body = w.take();
         return;
     }
     if (p == "/api/presence" && m == "PUT")
-        return handlePresencePut(req, user, token, resp);
-    if (p == "/api/presence" && m == "GET") return handlePresenceGet(resp);
-    if (p.rfind("/api/admin/", 0) == 0) return handleAdmin(req, user, resp);
-    if (p == "/api/pcaps" && m == "GET") return handlePcapsGet(resp);
-    if (p == "/api/pcaps" && m == "POST") return handlePcapsPost(req, resp);
-    if (p == "/api/pcaps/folders" && m == "POST") return handleFolderPost(req, resp);
+        return handlePresencePut(req, c, token, resp);
+    if (p == "/api/presence" && m == "GET") return handlePresenceGet(c, resp);
+    if (p.rfind("/api/admin/", 0) == 0) return handleAdmin(req, c, resp);
+    if (p == "/api/domain" || p.rfind("/api/domain/", 0) == 0)
+        return handleDomainApi(req, c, resp);
+    if (p == "/api/pcaps" && m == "GET") return handlePcapsGet(c, resp);
+    if (p == "/api/pcaps" && m == "POST") return handlePcapsPost(req, c, resp);
+    if (p == "/api/pcaps/folders" && m == "POST")
+        return handleFolderPost(req, c, resp);
     if (p.rfind("/api/pcaps/folders/", 0) == 0 && m == "DELETE")
-        return handleFolderDelete(p.substr(sizeof "/api/pcaps/folders/" - 1), resp);
+        return handleFolderDelete(p.substr(sizeof "/api/pcaps/folders/" - 1),
+                                  c, resp);
     if (p.rfind("/api/pcaps/", 0) == 0) {
         std::string pid = p.substr(sizeof "/api/pcaps/" - 1);
         if (pid.find('/') == std::string::npos && !pid.empty()) {
-            if (m == "DELETE") return handlePcapDelete(pid, user, resp);
-            if (m == "PUT") return handlePcapMove(req, pid, resp);
+            if (m == "DELETE") return handlePcapDelete(pid, c, resp);
+            if (m == "PUT") return handlePcapMove(req, pid, c, resp);
         }
     }
-    if (p == "/api/sessions" && m == "GET") return handleSessionsGet(resp);
-    if (p == "/api/sessions" && m == "POST") return handleSessionsPost(req, resp);
-    if (p == "/api/metrics" && m == "GET") return handleMetrics(resp);
-    if (p == "/api/devices" && m == "PUT") return handleDeviceNamePut(req, resp);
+    if (p == "/api/sessions" && m == "GET") return handleSessionsGet(c, resp);
+    if (p == "/api/sessions" && m == "POST")
+        return handleSessionsPost(req, c, resp);
+    if (p == "/api/metrics" && m == "GET") return handleMetrics(c, resp);
+    if (p == "/api/devices" && m == "PUT")
+        return handleDeviceNamePut(req, c, resp);
 
     std::string id, tail;
     if (splitSessionPath(p, id, tail)) {
-        if (tail.empty() && m == "GET") return handleSessionGet(id, resp);
-        if (tail.empty() && m == "DELETE") return handleSessionDelete(id, resp);
-        if (tail == "events" && m == "GET") return handleEvents(req, id, resp);
-        if (tail == "state" && m == "GET") return handleState(id, resp);
-        if (tail == "notes" && m == "GET") return handleNotesGet(id, resp);
-        if (tail == "notes" && m == "PUT") return handleNotesPut(req, id, resp);
-        if (tail == "info" && m == "GET") return handleInfo(id, resp);
+        if (tail.empty() && m == "GET") return handleSessionGet(id, c, resp);
+        if (tail.empty() && m == "DELETE")
+            return handleSessionDelete(id, c, resp);
+        if (tail == "events" && m == "GET")
+            return handleEvents(req, id, c, resp);
+        if (tail == "state" && m == "GET") return handleState(id, c, resp);
+        if (tail == "notes" && m == "GET") return handleNotesGet(id, c, resp);
+        if (tail == "notes" && m == "PUT")
+            return handleNotesPut(req, id, c, resp);
+        if (tail == "info" && m == "GET") return handleInfo(id, c, resp);
         if (tail.rfind("packets/", 0) == 0 && m == "GET")
-            return handlePacket(id, tail.substr(8), resp);
-        if (tail == "srcmap" && m == "GET") return handleSrcMap(id, resp);
+            return handlePacket(id, tail.substr(8), c, resp);
+        if (tail == "srcmap" && m == "GET") return handleSrcMap(id, c, resp);
         if (tail.rfind("sources/", 0) == 0 && m == "PUT")
-            return handleSourceAlias(req, id, tail.substr(8), resp);
+            return handleSourceAlias(req, id, tail.substr(8), c, resp);
     }
 
     jsonError(resp, 404, "no such endpoint: " + m + " " + p);
+}
+
+std::shared_ptr<Session> Api::findScoped(const std::string& id,
+                                         const Caller& c) const {
+    auto s = mEngine.find(id);
+    // Cross-domain access answers exactly like a missing id (404 upstream)
+    // so object existence does not leak between tenants (SE-5).
+    if (s && s->domain != c.domain) return nullptr;
+    return s;
 }
 
 // ------------------------------------------------------------------ auth -
@@ -182,8 +290,14 @@ void Api::handleRegister(HttpRequest& req, HttpResponse& resp) {
     std::string password = body.getStr("password");
     // Bootstrap: with no admin yet (fresh deployment, no AVB_ADMIN_USER), the
     // first account created IS the admin. Once an admin exists, registration
-    // creates regular users as before.
+    // creates regular users as before — unless the deployment disabled open
+    // registration (AVB_DISABLE_REGISTRATION=1; recommended when exposed).
     bool bootstrap = !mAuth.hasAdmin();
+    if (mRegistrationDisabled && !bootstrap)
+        return jsonError(resp, 403,
+                         "open registration is disabled on this deployment — "
+                         "ask an administrator or your domain owner for an "
+                         "account");
     std::string err;
     if (!mAuth.registerUser(username, password, err,
                             bootstrap ? "admin" : "user")) {
@@ -210,10 +324,10 @@ void Api::handleLogin(HttpRequest& req, HttpResponse& resp) {
 
 // ----------------------------------------------------------------- pcaps -
 
-void Api::handlePcapsGet(HttpResponse& resp) {
+void Api::handlePcapsGet(const Caller& c, HttpResponse& resp) {
     JsonWriter w;
     w.beginObj().key("pcaps").beginArr();
-    for (auto& p : mStore.pcaps()) {
+    for (auto& p : mStore.pcaps(c.domain)) {
         w.beginObj();
         w.kv("id", p.id);
         w.kv("name", p.name);
@@ -224,13 +338,14 @@ void Api::handlePcapsGet(HttpResponse& resp) {
     }
     w.endArr();
     w.key("folders").beginArr();
-    for (auto& f : mStore.pcapFolders()) w.value(f);
+    for (auto& f : mStore.pcapFolders(c.domain)) w.value(f);
     w.endArr();
     w.endObj();
     resp.body = w.take();
 }
 
-void Api::handlePcapsPost(HttpRequest& req, HttpResponse& resp) {
+void Api::handlePcapsPost(HttpRequest& req, const Caller& c,
+                          HttpResponse& resp) {
     if (req.body.empty()) return jsonError(resp, 400, "empty upload");
     std::string name = req.queryParam("name");
     if (name.empty()) name = "capture.pcap";
@@ -276,7 +391,7 @@ void Api::handlePcapsPost(HttpRequest& req, HttpResponse& resp) {
     if (!ok) return jsonError(resp, 400, "not a valid capture: " + perr);
 
     std::string err;
-    std::string id = mStore.addPcap(name, bytes, folder, err);
+    std::string id = mStore.addPcap(name, bytes, folder, c.domain, err);
     if (id.empty())
         return jsonError(resp, err.rfind("folder name", 0) == 0 ? 400 : 500, err);
 
@@ -287,10 +402,16 @@ void Api::handlePcapsPost(HttpRequest& req, HttpResponse& resp) {
     resp.body = w.take();
 }
 
-void Api::handlePcapDelete(const std::string& id, const std::string& user,
+void Api::handlePcapDelete(const std::string& id, const Caller& c,
                            HttpResponse& resp) {
-    if (mAuth.roleOf(user) != "admin")
-        return jsonError(resp, 403, "admin role required to delete pcaps");
+    // Admins and the owner of the domain may delete captures — inside their
+    // own domain only. Unknown and foreign ids answer the same 404.
+    if (mStore.pcapDomain(id) != c.domain)
+        return jsonError(resp, 404, "no such pcap " + id);
+    if (!c.admin() && mStore.domainOwner(c.domain) != c.user)
+        return jsonError(resp, 403,
+                         "admin role or domain ownership required to delete "
+                         "pcaps");
     std::string err;
     if (!mStore.removePcap(id, err))
         return jsonError(resp, err.rfind("no such", 0) == 0 ? 404 : 500, err);
@@ -298,7 +419,9 @@ void Api::handlePcapDelete(const std::string& id, const std::string& user,
 }
 
 void Api::handlePcapMove(HttpRequest& req, const std::string& id,
-                         HttpResponse& resp) {
+                         const Caller& c, HttpResponse& resp) {
+    if (mStore.pcapDomain(id) != c.domain)
+        return jsonError(resp, 404, "no such pcap " + id);
     JsonValue body = JsonValue::parse(req.body);
     const JsonValue* f = body.get("folder");
     if (!f || f->type != JsonValue::Type::String)
@@ -309,28 +432,31 @@ void Api::handlePcapMove(HttpRequest& req, const std::string& id,
     resp.body = "{\"ok\":true}";
 }
 
-void Api::handleFolderPost(HttpRequest& req, HttpResponse& resp) {
+void Api::handleFolderPost(HttpRequest& req, const Caller& c,
+                           HttpResponse& resp) {
     JsonValue body = JsonValue::parse(req.body);
     std::string err;
-    if (!mStore.addPcapFolder(body.getStr("name"), err))
+    if (!mStore.addPcapFolder(c.domain, body.getStr("name"), err))
         return jsonError(resp, 400, err);
     resp.status = 201;
     resp.body = "{\"ok\":true}";
 }
 
-void Api::handleFolderDelete(const std::string& name, HttpResponse& resp) {
+void Api::handleFolderDelete(const std::string& name, const Caller& c,
+                             HttpResponse& resp) {
     std::string err;
-    if (!mStore.removePcapFolder(name, err))
+    if (!mStore.removePcapFolder(c.domain, name, err))
         return jsonError(resp, 400, err);
     resp.body = "{\"ok\":true}";
 }
 
 // -------------------------------------------------------------- sessions -
 
-void Api::handleSessionsGet(HttpResponse& resp) {
+void Api::handleSessionsGet(const Caller& c, HttpResponse& resp) {
     JsonWriter w;
     w.beginObj().key("sessions").beginArr();
     for (auto& s : mEngine.list()) {
+        if (s->domain != c.domain) continue; // tenancy (SE-5)
         w.beginObj();
         sessionSummary(w, *s);
         w.endObj();
@@ -339,7 +465,8 @@ void Api::handleSessionsGet(HttpResponse& resp) {
     resp.body = w.take();
 }
 
-void Api::handleSessionsPost(HttpRequest& req, HttpResponse& resp) {
+void Api::handleSessionsPost(HttpRequest& req, const Caller& c,
+                             HttpResponse& resp) {
     JsonValue body = JsonValue::parse(req.body);
     std::string pcapId = body.getStr("pcap_id");
     std::string path = body.getStr("path");
@@ -351,10 +478,12 @@ void Api::handleSessionsPost(HttpRequest& req, HttpResponse& resp) {
 
     auto s = std::make_shared<Session>();
     Store::SessionMeta meta;
+    meta.domain = c.domain;
+    s->domain = c.domain;
     bool combine = pcapIds.size() > 1;
     if (!pcapIds.empty()) {
         for (auto& pid : pcapIds)
-            if (!mStore.hasPcap(pid))
+            if (mStore.pcapDomain(pid) != c.domain)
                 return jsonError(resp, 404, "unknown pcap_id " + pid);
         meta.pcapIds = pcapIds;
         s->pcapId = meta.pcapId = pcapIds.front();
@@ -363,11 +492,17 @@ void Api::handleSessionsPost(HttpRequest& req, HttpResponse& resp) {
             s->name += " + " + std::to_string(pcapIds.size() - 1) + " more";
         meta.name = s->name;
     } else if (!pcapId.empty()) {
-        if (!mStore.hasPcap(pcapId))
+        if (mStore.pcapDomain(pcapId) != c.domain)
             return jsonError(resp, 404, "unknown pcap_id " + pcapId);
         s->pcapId = meta.pcapId = pcapId;
         s->name = meta.name = mStore.pcapName(pcapId);
     } else if (!path.empty()) {
+        // Opening an arbitrary server-side file is a host-filesystem read —
+        // administrators only (SE-5); the UI uses the upload library.
+        if (!c.admin())
+            return jsonError(resp, 403,
+                             "opening captures by server path requires the "
+                             "admin role — upload the file instead");
         struct stat st{};
         if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
             return jsonError(resp, 404, "no such file on backend: " + path);
@@ -409,8 +544,9 @@ void Api::handleSessionsPost(HttpRequest& req, HttpResponse& resp) {
     resp.body = w.take();
 }
 
-void Api::handleSessionGet(const std::string& id, HttpResponse& resp) {
-    auto s = mEngine.find(id);
+void Api::handleSessionGet(const std::string& id, const Caller& c,
+                           HttpResponse& resp) {
+    auto s = findScoped(id, c);
     if (!s) return jsonError(resp, 404, "no such session " + id);
     JsonWriter w;
     w.beginObj();
@@ -423,7 +559,10 @@ void Api::handleSessionGet(const std::string& id, HttpResponse& resp) {
     resp.body = w.take();
 }
 
-void Api::handleSessionDelete(const std::string& id, HttpResponse& resp) {
+void Api::handleSessionDelete(const std::string& id, const Caller& c,
+                              HttpResponse& resp) {
+    if (!findScoped(id, c))
+        return jsonError(resp, 404, "no such session " + id);
     if (!mEngine.remove(id)) return jsonError(resp, 404, "no such session " + id);
     mStore.removeSession(id);
     resp.body = "{\"ok\":true}";
@@ -432,8 +571,8 @@ void Api::handleSessionDelete(const std::string& id, HttpResponse& resp) {
 // ---------------------------------------------------------------- events -
 
 void Api::handleEvents(HttpRequest& req, const std::string& id,
-                       HttpResponse& resp) {
-    auto s = mEngine.find(id);
+                       const Caller& c, HttpResponse& resp) {
+    auto s = findScoped(id, c);
     if (!s) return jsonError(resp, 404, "no such session " + id);
 
     if (req.queryParam("compact") == "1") {
@@ -533,8 +672,8 @@ void Api::handleEvents(HttpRequest& req, const std::string& id,
 // --------------------------------------------------------------- packets -
 
 void Api::handlePacket(const std::string& id, const std::string& nStr,
-                       HttpResponse& resp) {
-    auto s = mEngine.find(id);
+                       const Caller& c, HttpResponse& resp) {
+    auto s = findScoped(id, c);
     if (!s) return jsonError(resp, 404, "no such session " + id);
     char* end = nullptr;
     unsigned long long n = std::strtoull(nStr.c_str(), &end, 10);
@@ -597,8 +736,10 @@ void Api::handlePacket(const std::string& id, const std::string& nStr,
     resp.body = w.take();
 }
 
-void Api::handleSrcMap(const std::string& id, HttpResponse& resp) {
-    if (!mEngine.find(id)) return jsonError(resp, 404, "no such session " + id);
+void Api::handleSrcMap(const std::string& id, const Caller& c,
+                       HttpResponse& resp) {
+    if (!findScoped(id, c))
+        return jsonError(resp, 404, "no such session " + id);
     std::ifstream f(mStore.sessionSrcMapPath(id), std::ios::binary);
     if (!f) return jsonError(resp, 404, "session has no source map (single capture)");
     std::stringstream ss;
@@ -608,8 +749,10 @@ void Api::handleSrcMap(const std::string& id, HttpResponse& resp) {
 }
 
 void Api::handleSourceAlias(HttpRequest& req, const std::string& id,
-                            const std::string& idxStr, HttpResponse& resp) {
-    if (!mEngine.find(id)) return jsonError(resp, 404, "no such session " + id);
+                            const std::string& idxStr, const Caller& c,
+                            HttpResponse& resp) {
+    if (!findScoped(id, c))
+        return jsonError(resp, 404, "no such session " + id);
     char* end = nullptr;
     unsigned long long idx = std::strtoull(idxStr.c_str(), &end, 10);
     if (!end || *end != '\0')
@@ -638,8 +781,10 @@ std::string notesRev(const std::string& markdown) {
 
 } // namespace
 
-void Api::handleNotesGet(const std::string& id, HttpResponse& resp) {
-    if (!mEngine.find(id)) return jsonError(resp, 404, "no such session " + id);
+void Api::handleNotesGet(const std::string& id, const Caller& c,
+                         HttpResponse& resp) {
+    if (!findScoped(id, c))
+        return jsonError(resp, 404, "no such session " + id);
     std::string md = mStore.readNotes(id);
     JsonWriter w;
     w.beginObj().kv("markdown", md).kv("rev", notesRev(md)).endObj();
@@ -647,8 +792,9 @@ void Api::handleNotesGet(const std::string& id, HttpResponse& resp) {
 }
 
 void Api::handleNotesPut(HttpRequest& req, const std::string& id,
-                         HttpResponse& resp) {
-    if (!mEngine.find(id)) return jsonError(resp, 404, "no such session " + id);
+                         const Caller& c, HttpResponse& resp) {
+    if (!findScoped(id, c))
+        return jsonError(resp, 404, "no such session " + id);
     std::string perr;
     JsonValue body = JsonValue::parse(req.body, &perr);
     const JsonValue* md = body.get("markdown");
@@ -685,15 +831,16 @@ void Api::handleNotesPut(HttpRequest& req, const std::string& id,
 
 // ----------------------------------------------------------------- state -
 
-void Api::handleState(const std::string& id, HttpResponse& resp) {
-    auto s = mEngine.find(id);
+void Api::handleState(const std::string& id, const Caller& c,
+                      HttpResponse& resp) {
+    auto s = findScoped(id, c);
     if (!s) return jsonError(resp, 404, "no such session " + id);
     resp.body = s->stateJson();
 }
 
 // -------------------------------------------------------------- presence -
 
-void Api::handlePresencePut(HttpRequest& req, const std::string& user,
+void Api::handlePresencePut(HttpRequest& req, const Caller& c,
                             const std::string& token, HttpResponse& resp) {
     JsonValue body = JsonValue::parse(req.body);
     std::string view = body.getStr("view");
@@ -701,7 +848,7 @@ void Api::handlePresencePut(HttpRequest& req, const std::string& user,
     auto now = std::chrono::steady_clock::now();
     {
         std::lock_guard lk(mPresenceMu);
-        mPresence[token] = {user, view, now};
+        mPresence[token] = {c.user, view, c.domain, now};
         // Lazy expiry of stale entries (closed tabs, logouts).
         for (auto it = mPresence.begin(); it != mPresence.end();) {
             if (now - it->second.seen > std::chrono::seconds(60))
@@ -713,19 +860,22 @@ void Api::handlePresencePut(HttpRequest& req, const std::string& user,
     resp.body = "{\"ok\":true}";
 }
 
-void Api::handlePresenceGet(HttpResponse& resp) {
+void Api::handlePresenceGet(const Caller& c, HttpResponse& resp) {
     auto now = std::chrono::steady_clock::now();
     JsonWriter w;
     w.beginObj().key("users").beginArr();
     {
         std::lock_guard lk(mPresenceMu);
         for (auto& [token, pr] : mPresence) {
+            // Presence is domain-scoped; only global admins see everyone.
+            if (!c.admin() && pr.domain != c.domain) continue;
             double idle = std::chrono::duration<double>(now - pr.seen).count();
             if (idle > 60) continue;
             w.beginObj();
             w.kv("username", pr.user);
             w.kv("view", pr.view);
             w.kv("idle_s", idle);
+            if (c.admin()) w.kv("domain", pr.domain);
             w.endObj();
         }
     }
@@ -735,10 +885,8 @@ void Api::handlePresenceGet(HttpResponse& resp) {
 
 // ----------------------------------------------------------------- admin -
 
-void Api::handleAdmin(HttpRequest& req, const std::string& user,
-                      HttpResponse& resp) {
-    if (mAuth.roleOf(user) != "admin")
-        return jsonError(resp, 403, "admin role required");
+void Api::handleAdmin(HttpRequest& req, const Caller& c, HttpResponse& resp) {
+    if (!c.admin()) return jsonError(resp, 403, "admin role required");
     const std::string& p = req.path;
     const std::string& m = req.method;
 
@@ -763,6 +911,7 @@ void Api::handleAdmin(HttpRequest& req, const std::string& user,
             w.beginObj();
             w.kv("username", u.username);
             w.kv("role", u.role);
+            w.kv("domain", u.domain);
             auto it = online.find(u.username);
             w.kv("online", it != online.end());
             w.kv("view", it != online.end() ? it->second.first : "");
@@ -774,14 +923,111 @@ void Api::handleAdmin(HttpRequest& req, const std::string& user,
     }
     if (p == "/api/admin/users" && m == "POST") {
         JsonValue body = JsonValue::parse(req.body);
+        std::string domain = body.getStr("domain", "default");
+        if (domain.empty()) domain = "default";
+        if (!mStore.hasDomain(domain))
+            return jsonError(resp, 400, "no such domain " + domain);
         std::string err;
         if (!mAuth.registerUser(body.getStr("username"),
                                 body.getStr("password"), err,
-                                body.getStr("role", "user")))
+                                body.getStr("role", "user"), domain))
             return jsonError(resp, err == "username already exists" ? 409 : 400,
                              err);
         resp.status = 201;
         resp.body = "{\"ok\":true}";
+        return;
+    }
+    // ---- domain lifecycle (SE-5): the global admin creates a domain and
+    // names its owner; the owner then manages its users via /api/domain. ----
+    if (p == "/api/admin/domains" && m == "GET") {
+        auto pcaps = mStore.pcaps();
+        auto sessions = mStore.sessions();
+        auto users = mAuth.users();
+        JsonWriter w;
+        w.beginObj().key("domains").beginArr();
+        for (auto& d : mStore.domains()) {
+            uint64_t bytes = 0, np = 0, ns = 0, nu = 0;
+            for (auto& pm : pcaps)
+                if (pm.domain == d.id) { ++np; bytes += pm.size; }
+            for (auto& sm : sessions)
+                if (sm.domain == d.id) ++ns;
+            for (auto& u : users)
+                if (u.domain == d.id) ++nu;
+            w.beginObj();
+            w.kv("id", d.id);
+            w.kv("name", d.name);
+            w.kv("owner", d.owner);
+            w.kv("created_at", d.createdAt);
+            w.kv("users", nu);
+            w.kv("sessions", ns);
+            w.kv("pcaps", np);
+            w.kv("pcap_bytes", bytes);
+            w.endObj();
+        }
+        w.endArr().endObj();
+        resp.body = w.take();
+        return;
+    }
+    if (p == "/api/admin/domains" && m == "POST") {
+        JsonValue body = JsonValue::parse(req.body);
+        std::string id = body.getStr("id");
+        std::string name = body.getStr("name");
+        std::string owner = body.getStr("owner");
+        std::string ownerPass = body.getStr("owner_password");
+        if (owner.empty())
+            return jsonError(resp, 400,
+                             "body must contain id, owner (username) and, for "
+                             "a new owner account, owner_password");
+        std::string err;
+        bool ownerExists = !mAuth.roleOf(owner).empty();
+        if (!ownerExists && ownerPass.empty())
+            return jsonError(resp, 400,
+                             "owner " + owner +
+                                 " does not exist — provide owner_password to "
+                                 "create the account");
+        if (!mStore.addDomain(id, name, owner, err))
+            return jsonError(resp, err == "domain already exists" ? 409 : 400,
+                             err);
+        // Owner account: created inside the domain, or moved into it.
+        if (!ownerExists) {
+            if (!mAuth.registerUser(owner, ownerPass, err, "user", id)) {
+                std::vector<std::string> none;
+                std::string derr;
+                mStore.removeDomain(id, false, none, derr);
+                return jsonError(resp, 400, "cannot create owner: " + err);
+            }
+        } else if (!mAuth.setDomain(owner, id, err)) {
+            return jsonError(resp, 500, err);
+        }
+        resp.status = 201;
+        JsonWriter w;
+        w.beginObj().kv("ok", true).kv("id", id).kv("owner", owner).endObj();
+        resp.body = w.take();
+        return;
+    }
+    const std::string domPrefix = "/api/admin/domains/";
+    if (p.rfind(domPrefix, 0) == 0 && m == "DELETE") {
+        std::string id = p.substr(domPrefix.size());
+        bool force = req.queryParam("force") == "1";
+        std::vector<std::string> removedSessions;
+        std::string err;
+        if (!mStore.removeDomain(id, force, removedSessions, err))
+            return jsonError(resp, err == "no such domain" ? 404 : 400, err);
+        for (auto& sid : removedSessions) mEngine.remove(sid);
+        // Its users fall back into the built-in domain (accounts are not
+        // deleted — the admin can remove them explicitly).
+        std::string uerr;
+        for (auto& u : mAuth.users())
+            if (u.domain == id) mAuth.setDomain(u.username, "default", uerr);
+        resp.body = "{\"ok\":true}";
+        return;
+    }
+    if (p == "/api/admin/monitor" && m == "GET")
+        return handleAdminMonitor(resp);
+    if (p == "/api/admin/security" && m == "GET") {
+        JsonWriter w;
+        mGuard.snapshot(w);
+        resp.body = w.take();
         return;
     }
     if (p == "/api/admin/storage" && m == "GET") {
@@ -811,7 +1057,7 @@ void Api::handleAdmin(HttpRequest& req, const std::string& user,
     const std::string prefix = "/api/admin/users/";
     if (p.rfind(prefix, 0) == 0 && m == "DELETE") {
         std::string name = p.substr(prefix.size());
-        if (name == user)
+        if (name == c.user)
             return jsonError(resp, 400, "cannot delete your own account");
         std::string err;
         if (!mAuth.deleteUser(name, err))
@@ -820,6 +1066,258 @@ void Api::handleAdmin(HttpRequest& req, const std::string& user,
         return;
     }
     jsonError(resp, 404, "no such admin endpoint: " + m + " " + p);
+}
+
+// ---------------------------------------------------- domain self-service -
+
+void Api::handleDomainApi(HttpRequest& req, const Caller& c,
+                          HttpResponse& resp) {
+    const std::string& p = req.path;
+    const std::string& m = req.method;
+    bool owner = mStore.domainOwner(c.domain) == c.user || c.admin();
+
+    if (p == "/api/domain" && m == "GET") {
+        std::string domName = c.domain;
+        for (auto& d : mStore.domains())
+            if (d.id == c.domain) { domName = d.name; break; }
+        JsonWriter w;
+        w.beginObj();
+        w.kv("id", c.domain);
+        w.kv("name", domName);
+        w.kv("owner", mStore.domainOwner(c.domain));
+        w.kv("is_owner", owner);
+        if (owner) {
+            w.key("users").beginArr();
+            for (auto& u : mAuth.users()) {
+                if (u.domain != c.domain) continue;
+                w.beginObj();
+                w.kv("username", u.username);
+                w.kv("role", u.role);
+                w.kv("owner", u.username == mStore.domainOwner(c.domain));
+                w.endObj();
+            }
+            w.endArr();
+        }
+        w.endObj();
+        resp.body = w.take();
+        return;
+    }
+    if (!owner)
+        return jsonError(resp, 403,
+                         "domain ownership (or admin role) required");
+    if (p == "/api/domain/users" && m == "POST") {
+        JsonValue body = JsonValue::parse(req.body);
+        std::string err;
+        // Owners only ever mint regular users, always inside their domain.
+        if (!mAuth.registerUser(body.getStr("username"),
+                                body.getStr("password"), err, "user",
+                                c.domain))
+            return jsonError(resp, err == "username already exists" ? 409 : 400,
+                             err);
+        resp.status = 201;
+        resp.body = "{\"ok\":true}";
+        return;
+    }
+    const std::string prefix = "/api/domain/users/";
+    if (p.rfind(prefix, 0) == 0 && m == "DELETE") {
+        std::string name = p.substr(prefix.size());
+        Auth::UserInfo victim = mAuth.infoOf(name);
+        if (victim.username.empty() || victim.domain != c.domain)
+            return jsonError(resp, 404, "no such user in your domain");
+        if (name == c.user)
+            return jsonError(resp, 400, "cannot delete your own account");
+        if (victim.role == "admin" ||
+            name == mStore.domainOwner(c.domain))
+            return jsonError(resp, 403,
+                             "cannot delete admins or the domain owner");
+        std::string err;
+        if (!mAuth.deleteUser(name, err))
+            return jsonError(resp, err == "no such user" ? 404 : 400, err);
+        resp.body = "{\"ok\":true}";
+        return;
+    }
+    jsonError(resp, 404, "no such endpoint: " + m + " " + p);
+}
+
+// ---------------------------------------------------------------- monitor -
+
+void Api::trafficHit(const std::string& domain) {
+    int64_t nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    std::lock_guard lk(mTrafficMu);
+    DomainTraffic& t = mTraffic[domain];
+    if (t.lastSec != nowSec) {
+        // Clear every slot skipped since the last hit, then move on.
+        int64_t gap = nowSec - t.lastSec;
+        if (t.lastSec == 0 || gap >= 60) {
+            t.slots.fill(0);
+        } else {
+            for (int64_t s = t.lastSec + 1; s <= nowSec; ++s)
+                t.slots[(size_t)(s % 60)] = 0;
+        }
+        t.lastSec = nowSec;
+    }
+    t.slots[(size_t)(nowSec % 60)]++;
+    t.total++;
+}
+
+double Api::trafficPerMin(DomainTraffic& t, int64_t nowSec) const {
+    if (t.lastSec == 0 || nowSec - t.lastSec >= 60) return 0;
+    double sum = 0;
+    for (int64_t s = nowSec - 59; s <= nowSec; ++s)
+        if (s > t.lastSec - 60 && s <= t.lastSec)
+            sum += t.slots[(size_t)(s % 60)];
+    return sum;
+}
+
+void Api::handleAdminMonitor(HttpResponse& resp) {
+    // ---- CPU: deltas between two /proc samples (min 200 ms apart) ----
+    double procPct, sysPct;
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cores < 1) cores = 1;
+    {
+        std::lock_guard lk(mCpuMu);
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - mCpuAt).count();
+        if (mCpuAt.time_since_epoch().count() == 0 || dt > 0.2) {
+            uint64_t proc = 0, total = 0, idle = 0;
+            {
+                std::ifstream f("/proc/self/stat");
+                std::string tok;
+                // fields 14 (utime) and 15 (stime); field 2 (comm) may hold
+                // spaces, so skip past the closing paren first.
+                std::string all;
+                std::getline(f, all);
+                size_t par = all.rfind(')');
+                if (par != std::string::npos) {
+                    std::istringstream ss(all.substr(par + 2));
+                    std::string v;
+                    for (int i = 3; i <= 15 && ss >> v; ++i) {
+                        if (i == 14 || i == 15)
+                            proc += std::strtoull(v.c_str(), nullptr, 10);
+                    }
+                }
+            }
+            {
+                std::ifstream f("/proc/stat");
+                std::string cpu;
+                f >> cpu; // "cpu"
+                uint64_t v = 0;
+                for (int i = 0; i < 8 && (f >> v); ++i) {
+                    total += v;
+                    if (i == 3) idle = v; // idle column
+                }
+            }
+            long hz = sysconf(_SC_CLK_TCK);
+            if (hz < 1) hz = 100;
+            if (mCpuAt.time_since_epoch().count() != 0 && dt > 0) {
+                double dproc = (double)(proc - mCpuProcJiffies) / (double)hz;
+                mCpuProcPct = 100.0 * dproc / dt; // % of one core, like top
+                uint64_t dtot = total - mCpuTotalJiffies;
+                uint64_t didl = idle - mCpuIdleJiffies;
+                mCpuSysPct =
+                    dtot ? 100.0 * (double)(dtot - didl) / (double)dtot : 0;
+            }
+            mCpuProcJiffies = proc;
+            mCpuTotalJiffies = total;
+            mCpuIdleJiffies = idle;
+            mCpuAt = now;
+        }
+        procPct = mCpuProcPct;
+        sysPct = mCpuSysPct;
+    }
+
+    uint64_t rssKb = 0;
+    {
+        std::ifstream f("/proc/self/status");
+        std::string line;
+        while (std::getline(f, line))
+            if (line.rfind("VmRSS:", 0) == 0)
+                rssKb = std::strtoull(line.c_str() + 6, nullptr, 10);
+    }
+    uint64_t memTotalKb = 0, memAvailKb = 0;
+    {
+        std::ifstream f("/proc/meminfo");
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.rfind("MemTotal:", 0) == 0)
+                memTotalKb = std::strtoull(line.c_str() + 9, nullptr, 10);
+            else if (line.rfind("MemAvailable:", 0) == 0)
+                memAvailKb = std::strtoull(line.c_str() + 13, nullptr, 10);
+        }
+    }
+
+    // ---- per-domain inventory + activity ----
+    auto pcaps = mStore.pcaps();
+    auto sessionsMeta = mStore.sessions();
+    auto users = mAuth.users();
+    auto engineSessions = mEngine.list();
+    std::map<std::string, int> online, wsClients;
+    {
+        auto now = std::chrono::steady_clock::now();
+        std::lock_guard lk(mPresenceMu);
+        for (auto& [token, pr] : mPresence)
+            if (std::chrono::duration<double>(now - pr.seen).count() <= 60)
+                online[pr.domain]++;
+    }
+    for (auto& cl : mClients.list())
+        if (cl->kind == "ws") wsClients[mAuth.domainOf(cl->getUser())]++;
+    int64_t nowSec = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+
+    JsonWriter w;
+    w.beginObj();
+    w.key("cpu").beginObj();
+    w.kv("process_pct", procPct); // % of one core
+    w.kv("system_pct", sysPct);   // % of all cores
+    w.kv("cores", (uint64_t)cores);
+    w.endObj();
+    w.key("mem").beginObj();
+    w.kv("rss_kb", rssKb);
+    w.kv("total_kb", memTotalKb);
+    w.kv("available_kb", memAvailKb);
+    w.endObj();
+    w.kv("uptime_s", std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - mStart)
+                         .count());
+
+    w.key("domains").beginArr();
+    for (auto& d : mStore.domains()) {
+        uint64_t np = 0, bytes = 0, ns = 0, running = 0, nu = 0;
+        for (auto& pm : pcaps)
+            if (pm.domain == d.id) { ++np; bytes += pm.size; }
+        for (auto& sm : sessionsMeta)
+            if (sm.domain == d.id) ++ns;
+        for (auto& es : engineSessions)
+            if (es->domain == d.id && es->status.load() == Session::Running)
+                ++running;
+        for (auto& u : users)
+            if (u.domain == d.id) ++nu;
+        double rpm = 0;
+        {
+            std::lock_guard lk(mTrafficMu);
+            auto it = mTraffic.find(d.id);
+            if (it != mTraffic.end()) rpm = trafficPerMin(it->second, nowSec);
+        }
+        w.beginObj();
+        w.kv("id", d.id);
+        w.kv("name", d.name);
+        w.kv("owner", d.owner);
+        w.kv("users", nu);
+        w.kv("online", (uint64_t)online[d.id]);
+        w.kv("sessions", ns);
+        w.kv("running", running);
+        w.kv("pcaps", np);
+        w.kv("pcap_bytes", bytes);
+        w.kv("req_per_min", rpm);
+        w.kv("ws_clients", (uint64_t)wsClients[d.id]);
+        w.endObj();
+    }
+    w.endArr();
+    w.endObj();
+    resp.body = w.take();
 }
 
 // ------------------------------------------------------------------ info -
@@ -837,8 +1335,9 @@ std::string isoFromSec(time_t t) {
 
 } // namespace
 
-void Api::handleInfo(const std::string& id, HttpResponse& resp) {
-    auto s = mEngine.find(id);
+void Api::handleInfo(const std::string& id, const Caller& c,
+                     HttpResponse& resp) {
+    auto s = findScoped(id, c);
     if (!s) return jsonError(resp, 404, "no such session " + id);
 
     JsonWriter w;
@@ -897,7 +1396,7 @@ void Api::handleInfo(const std::string& id, HttpResponse& resp) {
     }
     w.endArr();
 
-    auto userNames = mStore.deviceNames();
+    auto userNames = mStore.deviceNames(c.domain);
     w.key("devices").beginArr();
     {
         std::lock_guard st2(s->stateMu);
@@ -933,7 +1432,8 @@ void Api::handleInfo(const std::string& id, HttpResponse& resp) {
     resp.body = w.take();
 }
 
-void Api::handleDeviceNamePut(HttpRequest& req, HttpResponse& resp) {
+void Api::handleDeviceNamePut(HttpRequest& req, const Caller& c,
+                              HttpResponse& resp) {
     JsonValue body = JsonValue::parse(req.body);
     std::string mac = body.getStr("mac");
     const JsonValue* nameV = body.get("name");
@@ -941,18 +1441,19 @@ void Api::handleDeviceNamePut(HttpRequest& req, HttpResponse& resp) {
         return jsonError(resp, 400,
                          "body must be {\"mac\": \"aa:bb:cc:dd:ee:ff\", "
                          "\"name\": \"...\"}");
-    for (char& c : mac)
-        if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+    for (char& ch : mac)
+        if (ch >= 'A' && ch <= 'F') ch = (char)(ch - 'A' + 'a');
     std::string name = nameV->str;
     if (name.size() > 64) return jsonError(resp, 400, "name too long (max 64)");
     std::string err;
-    if (!mStore.setDeviceName(mac, name, err)) return jsonError(resp, 500, err);
+    if (!mStore.setDeviceName(c.domain, mac, name, err))
+        return jsonError(resp, 500, err);
     resp.body = "{\"ok\":true}";
 }
 
 // --------------------------------------------------------------- metrics -
 
-void Api::handleMetrics(HttpResponse& resp) {
+void Api::handleMetrics(const Caller& c, HttpResponse& resp) {
     JsonWriter w;
     w.beginObj();
 
@@ -989,6 +1490,7 @@ void Api::handleMetrics(HttpResponse& resp) {
 
     w.key("sessions").beginArr();
     for (auto& s : mEngine.list()) {
+        if (s->domain != c.domain && !c.admin()) continue; // tenancy (SE-5)
         uint64_t ms = s->analysisMs.load();
         w.beginObj();
         w.kv("id", s->id);
@@ -1001,19 +1503,23 @@ void Api::handleMetrics(HttpResponse& resp) {
     }
     w.endArr();
 
+    // The connected-clients list names users and addresses across all
+    // domains — admins only.
     w.key("clients").beginArr();
-    for (auto& c : mClients.list()) {
-        w.beginObj();
-        w.kv("addr", c->addr);
-        w.kv("user", c->getUser());
-        w.kv("kind", c->kind);
-        w.kv("messages", c->messages.load());
-        w.kv("bytes_sent", c->bytesSent.load());
-        w.kv("connected_s",
-             std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                           c->since)
-                 .count());
-        w.endObj();
+    if (c.admin()) {
+        for (auto& cl : mClients.list()) {
+            w.beginObj();
+            w.kv("addr", cl->addr);
+            w.kv("user", cl->getUser());
+            w.kv("kind", cl->kind);
+            w.kv("messages", cl->messages.load());
+            w.kv("bytes_sent", cl->bytesSent.load());
+            w.kv("connected_s",
+                 std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - cl->since)
+                     .count());
+            w.endObj();
+        }
     }
     w.endArr();
 
@@ -1043,7 +1549,10 @@ bool Api::handleUpgrade(HttpRequest& req, int fd) {
         return true;
     }
     std::string sessionId = req.queryParam("session");
-    if (!mEngine.find(sessionId)) {
+    auto s = mEngine.find(sessionId);
+    // Same tenancy rule as the REST endpoints: a foreign session is
+    // indistinguishable from a missing one (SE-5).
+    if (!s || s->domain != mAuth.domainOf(user)) {
         ws.sendClose(4004, "unknown session");
         ::close(fd);
         return true;

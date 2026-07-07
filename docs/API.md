@@ -16,7 +16,22 @@ JSON (`application/json`) unless stated otherwise.
   cannot set headers on WS): `/api/ws?token=<token>&session=<id>`.
 - Errors use HTTP status codes with body `{"error": "<message>"}`.
   401 = missing/bad token, 403 = forbidden, 404 = unknown object,
-  409 = conflict, 400 = bad request.
+  409 = conflict, 400 = bad request, **429 = rate limited**.
+
+**Multi-tenancy (domains).** Every user belongs to exactly one *domain*
+(default `default`). Data endpoints are domain-scoped: pcaps, folders,
+sessions, notes and device names are only ever visible within the caller's
+domain, and a reference to another domain's object answers **404**, identical
+to a missing object, so existence never leaks across tenants. See
+`docs/SECURITY.md` §4.
+
+**Rate limiting (429).** Non-admin callers are limited by a per-user token
+bucket (default 30 r/s, burst 90; `AVB_RATE_RPS`/`AVB_RATE_BURST`), with a
+stricter bucket for uploads and session creation. The unauthenticated
+`login`/`register` endpoints are limited per client IP (default 0.5 r/s,
+burst 6; `AVB_LOGIN_RPS`/`AVB_LOGIN_BURST`). Over-limit responses are `429`
+with a `Retry-After` header. Admins are exempt. Set
+`AVB_DISABLE_REGISTRATION=1` to close open self-registration.
 
 ### GET /api/bootstrap
 
@@ -36,7 +51,8 @@ made `admin`; afterwards new accounts are regular `user`s.
 
 Request: `{"username": "alex", "password": "secret1234"}`
 Response 200: `{"token": "<64 hex chars>", "username": "alex"}`. 401 on bad
-credentials.
+credentials. `429` (with `Retry-After`) when the per-IP login rate is
+exceeded — the brute-force throttle applies before password verification.
 
 ### POST /api/logout
 
@@ -44,7 +60,9 @@ Response: `{"ok": true}` (token invalidated).
 
 ### GET /api/me
 
-Response: `{"username": "alex", "role": "user"}` (role: `"admin" | "user"`).
+Response: `{"username": "alex", "role": "user", "domain": "default",
+"domain_owner": false}` (role: `"admin" | "user"`; `domain_owner` true when
+the caller owns their domain and may manage its users via `/api/domain`).
 
 ## Presence
 
@@ -71,18 +89,79 @@ The deployment provisions the first admin from the environment:
 
 ### GET /api/admin/users
 
-`{"users": [{"username": "alex", "role": "user", "online": true,
-"view": "session/s1"}]}`
+`{"users": [{"username": "alex", "role": "user", "domain": "default",
+"online": true, "view": "session/s1"}]}`
 
 ### POST /api/admin/users
 
-Request: `{"username": "bob", "password": "…", "role": "user" | "admin"}`
+Request: `{"username": "bob", "password": "…", "role": "user" | "admin",
+"domain": "acme"}` (`domain` optional, defaults to `default`; must exist).
 Response 201: `{"ok": true}`. 409 when the name exists.
 
 ### DELETE /api/admin/users/{username}
 
 Response: `{"ok": true}` (revokes the user's tokens). 400 when targeting
 your own account or the last admin.
+
+### GET /api/admin/domains
+
+`{"domains": [{"id": "default", "name": "Default", "owner": "", "users": 3,
+"sessions": 2, "pcaps": 5, "pcap_bytes": 12345678}, …]}` — every domain with
+its inventory.
+
+### POST /api/admin/domains
+
+Request: `{"id": "acme", "name": "ACME Labs", "owner": "bob",
+"owner_password": "…"}`. `id` must match `[a-z][a-z0-9-]{0,31}` and not be
+reserved. `owner` becomes the domain owner: if the account is new,
+`owner_password` creates it inside the domain; an existing account is moved
+into the domain. Response 201: `{"ok": true, "id": "acme", "owner": "bob"}`.
+409 when the domain exists.
+
+### DELETE /api/admin/domains/{id}[?force=1]
+
+Deletes a domain. Without `force` it must hold no pcaps or sessions (400
+otherwise). With `force=1` its captures and sessions are removed too. Its
+user accounts are moved back to the `default` domain (not deleted). The
+built-in `default` domain cannot be removed. Response: `{"ok": true}`.
+
+### GET /api/admin/monitor
+
+Live host + per-domain load for the admin dashboard:
+`{"cpu": {"process_pct", "system_pct", "cores"}, "mem": {"rss_kb",
+"total_kb", "available_kb"}, "uptime_s", "domains": [{"id", "name", "owner",
+"users", "online", "sessions", "running", "pcaps", "pcap_bytes",
+"req_per_min", "ws_clients"}]}`.
+
+### GET /api/admin/security
+
+Flow-monitor snapshot (see `docs/SECURITY.md` §7):
+`{"recorded", "suspect", "alerts": [{"ts", "actor", "domain", "kind",
+"detail", "path"}], "samples": [{"ts", "actor", "method", "path", "status",
+"verdict"}], "actors": [{"actor", "domain", "role", "req_per_min",
+"baseline_rpm", "penalty"}]}`. Alert `kind` ∈ `auth-bruteforce`, `probe`,
+`path-traversal`, `rate-anomaly`, `limit-hammering`, `upload-flood`.
+
+## Domain self-service
+
+For domain **owners** (and admins). A domain owner manages only the users of
+their own domain.
+
+### GET /api/domain
+
+`{"id": "acme", "name": "ACME Labs", "owner": "bob", "is_owner": true,
+"users": [{"username": "bob", "role": "user", "owner": true}, …]}`. The
+`users` array is present only when the caller owns the domain.
+
+### POST /api/domain/users
+
+Owner-only. Request: `{"username": "carol", "password": "…"}` — creates a
+regular user inside the owner's domain. Response 201: `{"ok": true}`.
+
+### DELETE /api/domain/users/{username}
+
+Owner-only. Removes a user from the owner's domain. 403 for admins, the
+domain owner, or a user in another domain; 404 when not in your domain.
 
 ### GET /api/admin/storage
 
@@ -130,9 +209,10 @@ Response: `{"ok": true}`.
 
 ### DELETE /api/pcaps/{id}
 
-Admin only. Removes the stored file and its metadata. Sessions keep their
-own capture copy, so existing investigations are unaffected.
-Response: `{"ok": true}`; 403 for non-admins, 404 for unknown ids.
+Admin or the caller's **domain owner**. Removes the stored file and its
+metadata. Sessions keep their own capture copy, so existing investigations
+are unaffected. Response: `{"ok": true}`; 403 for other non-admins, 404 for
+unknown ids **or ids in another domain**.
 
 ### POST /api/pcaps/folders
 
@@ -149,7 +229,10 @@ Response: `{"ok": true}`.
 ### POST /api/sessions
 
 Request: `{"pcap_id": "p1"}` **or** `{"path": "/data/traces/x.pcap"}`
-(a path visible to the backend, e.g. a mounted volume).
+(a path visible to the backend, e.g. a mounted volume). Opening by `path`
+reads an arbitrary host file and is therefore **admin only** (403 otherwise —
+regular users and domain owners upload to the library instead). The new
+session belongs to the caller's domain.
 Response 201: `{"id": "s1", "status": "running"}`. Analysis runs
 asynchronously; poll `GET /api/sessions/{id}` or attach via WebSocket.
 

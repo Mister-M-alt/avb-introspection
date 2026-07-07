@@ -104,7 +104,7 @@ body {
 
 #user-name { color: var(--text-2); font-size: 12px; }
 
-#admin-link {
+#admin-link, #domain-link {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-2);
@@ -113,7 +113,7 @@ body {
   border-radius: 4px;
   white-space: nowrap;
 }
-#admin-link:hover { background: var(--hover); color: var(--text); }
+#admin-link:hover, #domain-link:hover { background: var(--hover); color: var(--text); }
 
 /* presence chip (#presence) + popover (#presence-list) */
 
@@ -653,10 +653,14 @@ body {
 
 .au-head, .aurow {
   display: grid;
-  grid-template-columns: var(--aucols, minmax(130px, 1fr) 84px minmax(180px, 1.6fr) 76px);
+  grid-template-columns: var(--aucols, minmax(120px, 1fr) 84px minmax(90px, 0.8fr) minmax(160px, 1.4fr) 76px);
   gap: 8px;
   align-items: center;
   padding: 6px 4px;
+}
+/* domain-owner view reuses the user table but drops the domain/online cols */
+.dom-au-head, .dom-aurow {
+  grid-template-columns: minmax(130px, 1fr) 84px 84px !important;
 }
 
 .ap-head, .aprow {
@@ -710,6 +714,79 @@ select.input {
   background: var(--raised);
   cursor: pointer;
 }
+
+/* ── header domain chip + link ──────────────────────────── */
+.domain-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* ── admin monitoring ───────────────────────────────────── */
+.mon-head, .monrow {
+  display: grid;
+  grid-template-columns: var(--moncols,
+    minmax(110px, 1.2fr) minmax(90px, 1fr) 60px 60px 84px 84px 88px 76px 52px);
+  gap: 8px;
+  align-items: center;
+  padding: 6px 4px;
+}
+.mon-head {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.6px;
+  text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+}
+.monrow { border-top: 1px solid var(--border); }
+.monrow:first-child { border-top: none; }
+.monrow > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mon-head .num, .monrow .num { text-align: right; }
+.monrow .num.hot { color: var(--st-warn); font-weight: 600; }
+
+/* ── admin domains ──────────────────────────────────────── */
+.dm-head, .dmrow {
+  display: grid;
+  grid-template-columns: var(--dmcols,
+    minmax(140px, 1.4fr) minmax(110px, 1fr) 64px 84px 84px 90px);
+  gap: 8px;
+  align-items: center;
+  padding: 6px 4px;
+}
+.dm-head {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.6px;
+  text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+}
+.dmrow { border-top: 1px solid var(--border); }
+.dmrow:first-child { border-top: none; }
+.dmrow > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-head .num, .dmrow .num { text-align: right; }
+.dmrow > span:last-child { text-align: right; }
+
+/* ── admin security ─────────────────────────────────────── */
+.sec-summary { margin-bottom: 8px; }
+.sec-sub {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+  text-transform: uppercase; color: var(--muted);
+  margin: 12px 0 4px;
+}
+.sec-alert, .sec-sample {
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px 4px; border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.sec-alert:first-child, .sec-sample:first-child { border-top: none; }
+.sec-alert .sec-detail { flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.sec-alert .sec-time { margin-left: auto; font-size: 11px; }
+.sec-sample .mono:nth-child(3) { flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.sec-sample .num { margin-left: auto; }
+.sec-sample.bad { background: color-mix(in srgb, var(--st-bad) 7%, transparent); }
+.errtext { color: var(--st-bad); }
 
 /* ── session view: toolbar ───────────────────────────────── */
 

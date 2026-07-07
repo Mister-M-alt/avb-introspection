@@ -211,8 +211,21 @@ clear upload error naming the tool, rather than a silent failure.
 --max-upload-mb N   pcap upload limit in MiB        (default 1024)
 ```
 
+Security-relevant environment variables (see **[SECURITY.md](SECURITY.md)**):
+
+```
+AVB_ADMIN_USER / AVB_ADMIN_PASSWORD   provision/promote the first global admin
+AVB_DISABLE_REGISTRATION=1            close open self-registration (recommended
+                                      when exposed — admins/owners create users)
+AVB_RATE_RPS / AVB_RATE_BURST         per-non-admin API rate limit (default 30 / 90)
+AVB_LOGIN_RPS / AVB_LOGIN_BURST       per-IP login/register limit (default 0.5 / 6)
+```
+
 TLS is **not** terminated by the backend — always run a reverse proxy (nginx)
-in front for anything beyond a trusted lab network.
+in front for anything beyond a trusted lab network. For a hardened,
+internet-facing or multi-tenant deployment (VLAN segmentation, systemd
+sandbox, one-container-per-domain, and a bypass-verification checklist),
+follow **[SECURITY.md](SECURITY.md)**.
 
 ---
 

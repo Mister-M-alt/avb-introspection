@@ -231,33 +231,49 @@ Resolutions of the open questions from draft v0.2:
 - **OQ-12** — *TLS:* confirm whether TLS (via reverse proxy or native) is
   required for v1 remote deployments, or acceptable to defer.
 
-## 10. Multi-user domains — v2 outlook (design, not yet implemented)
+## 10. Multi-user domains + remote-exposure hardening (SE-5..7, implemented)
 
-v1 already supports multiple concurrent users with roles (`admin`/`user`,
-SE-1..3), presence, and conflict-safe notes editing — but all users share
-one flat data space. The long-term goal is one deployment serving **users
-from different domains (teams/organizations) that must stay isolated from
-one another**. The agreed design to prepare for:
+One deployment serves **users from different domains (teams/organizations)
+that stay isolated from one another**, and the server is hardened for
+exposure beyond a trusted lab. Full deployment guide: `docs/SECURITY.md`.
 
-- **Tenancy model** — every user belongs to exactly one *domain*. Roles
-  become domain-scoped: a *domain admin* manages users and data of their
-  domain; a *global admin* (the deployment operator) manages domains and
-  global settings. The v1 `AVB_ADMIN_USER` becomes the first global admin.
-- **Data isolation** — every object is domain-owned: pcap uploads, session
-  folders (captures + notes), and device names move under
-  `data/domains/<domain>/{pcaps,sessions,devices.json}`; `users.json` gains
-  a `domain` field. Device names become per-domain (the same MAC may carry
-  different names in different domains).
-- **Authorization** — every API handler resolves the caller's domain and
-  refuses cross-domain object access, answering **404** (not 403) so object
-  existence does not leak across domains. The admin API splits into
-  `/api/admin/…` (domain scope) and `/api/global/…` (global admin).
-- **Presence and metrics scoping** — presence lists only the caller's
-  domain; per-session metrics likewise. The global admin sees everything.
-- **Resource isolation (NF-3)** — per-domain quotas: upload bytes, stored
-  sessions, concurrent analyses, and WebSocket clients, so one domain cannot
-  starve another on a shared deployment.
-- **Audit** — admin actions (user create/delete, quota changes) recorded in
-  an append-only per-domain audit log.
-- **Migration** — existing single-tenant data moves to a built-in domain
-  named `default`; v1 accounts join it unchanged, preserving BE-8.
+### SE-5 — Tenancy (domains)
+- Every user belongs to exactly one *domain* (`users.json` gains a `domain`
+  field). A **domain owner** manages the users of their own domain (the *My
+  domain* view / `/api/domain`); a **global admin** (the `AVB_ADMIN_USER`)
+  manages domains and every user (`/api/admin/domains`).
+- Every object is domain-owned: pcap uploads, folders, session folders
+  (captures + notes) and device names. Non-default domains keep their pcap
+  files under `pcaps/domains/<id>/…`; device names are per-domain.
+- Every API handler (and the WebSocket) resolves the caller's domain and
+  refuses cross-domain access, answering **404** (not 403) so object
+  existence does not leak. Opening a capture by server path is admin-only.
+- Presence and metrics are domain-scoped; the global admin sees everything.
+- **Migration** — existing single-tenant data joins the built-in `default`
+  domain unchanged, preserving BE-8. Stronger isolation for untrusting
+  tenants: one container per domain (`docs/SECURITY.md` §4).
+
+### SE-6 — Rate limiting
+- Per-user token bucket for non-admins (`AVB_RATE_RPS`/`AVB_RATE_BURST`),
+  a stricter bucket for uploads and session creation, and a per-IP bucket on
+  the unauthenticated login/register endpoints (`AVB_LOGIN_RPS`/
+  `AVB_LOGIN_BURST`) applied before password verification. `429` +
+  `Retry-After`; admins exempt. `AVB_DISABLE_REGISTRATION=1` closes signup.
+
+### SE-7 — Flow monitoring
+- FlowGuard samples every request and raises alerts (`auth-bruteforce`,
+  `probe`, `path-traversal`, `rate-anomaly`, `limit-hammering`,
+  `upload-flood`) with a rolling window + per-actor EWMA baseline, raises the
+  rate-limit penalty for flagged actors, appends to `security.log` (JSONL),
+  and surfaces in the admin Security + Monitoring panels (per-domain load,
+  process CPU/memory).
+
+### Deployment hardening (OQ-12, `docs/SECURITY.md`)
+- Backend on loopback behind an nginx that terminates TLS, adds security
+  headers (HSTS, CSP, nosniff, frame-deny) and edge rate/connection limits.
+- systemd sandbox so a full process compromise cannot repurpose the host:
+  read-only FS except the data dir, no capabilities, seccomp allow-list,
+  `MemoryDenyWriteExecute`, and a cgroup egress firewall
+  (`IPAddressDeny=any`), plus CPU/memory/task quotas.
+- VLAN segmentation with default-deny egress; a verification checklist proves
+  the sandbox holds and the isolation/limits cannot be bypassed.

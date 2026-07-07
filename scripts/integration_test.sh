@@ -43,7 +43,10 @@ make -s -j"$(nproc)" "$BIN"
 python3 tools/gen_pcaps.py >/dev/null
 
 echo "== start backend on :$PORT (data: $DATA)"
+# Relax the login/register brute-force limiter for the test's rapid, single-IP
+# login bursts (production defaults to 0.5 r/s, burst 6 — see docs/SECURITY.md).
 AVB_ADMIN_USER=admin AVB_ADMIN_PASSWORD=admin-pass-123 \
+AVB_LOGIN_RPS=100 AVB_LOGIN_BURST=200 \
     "$BIN" --port "$PORT" --data "$DATA" --frontend frontend &
 PID=$!
 wait_port
@@ -53,7 +56,10 @@ python3 scripts/it_client.py "$PORT" main
 echo "== restart backend (BE-8 persistence)"
 kill "$PID"
 wait "$PID" 2>/dev/null || true
+# Relax the login/register brute-force limiter for the test's rapid, single-IP
+# login bursts (production defaults to 0.5 r/s, burst 6 — see docs/SECURITY.md).
 AVB_ADMIN_USER=admin AVB_ADMIN_PASSWORD=admin-pass-123 \
+AVB_LOGIN_RPS=100 AVB_LOGIN_BURST=200 \
     "$BIN" --port "$PORT" --data "$DATA" --frontend frontend &
 PID=$!
 wait_port

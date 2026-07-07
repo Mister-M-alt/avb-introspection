@@ -233,6 +233,8 @@ function mdToHtml(src) {
 let token = localStorage.getItem(TOKEN_KEY) || '';
 let username = localStorage.getItem(USER_KEY) || '';
 let role = localStorage.getItem(ROLE_KEY) || '';   /* '' until /api/me answers */
+let domain = '';        /* caller's tenant domain (SE-5), from /api/me */
+let domainOwner = false; /* is the caller the owner of their domain? */
 let pendingHash = '';
 
 function setAuth(tok, user) {
@@ -269,7 +271,10 @@ async function refreshRole() {
       updateUserbox();
     }
     const prev = role;
+    domain = me.domain || '';
+    domainOwner = !!me.domain_owner;
     setRole(me.role || '');
+    updateUserbox();
     if (role !== prev && parseRoute().view === 'admin') render();
   } catch (err) { /* 401 already handled by api() */ }
 }
@@ -373,8 +378,22 @@ function updateUserbox() {
     box.hidden = !token;
     name.textContent = username;
   }
+  /* Domain chip: only meaningful once more than the built-in domain is in
+     play, so hide it for a plain "default" tenant to avoid clutter. */
+  const domChip = document.getElementById('domain-chip');
+  if (domChip) {
+    const show = token && domain && domain !== 'default';
+    domChip.hidden = !show;
+    if (show) {
+      domChip.textContent = (domainOwner ? '★ ' : '') + domain;
+      domChip.title = 'your domain: ' + domain
+        + (domainOwner ? ' (you are the owner)' : '');
+    }
+  }
   const adminLink = document.getElementById('admin-link');
   if (adminLink) adminLink.hidden = !(token && role === 'admin');
+  const domLink = document.getElementById('domain-link');
+  if (domLink) domLink.hidden = !(token && domainOwner && role !== 'admin');
   const presenceWrap = document.getElementById('presence-wrap');
   if (presenceWrap) {
     presenceWrap.hidden = !token;
@@ -402,6 +421,7 @@ function humanizeView(v) {
   const s = String(v || '');
   if (s === 'home') return 'home';
   if (s === 'admin') return 'admin panel';
+  if (s === 'domain') return 'domain admin';
   let m = s.match(/^session\/(.+):notes$/);
   if (m) return 'session ' + m[1] + ' (notes)';
   m = s.match(/^session\/(.+)$/);
@@ -483,6 +503,7 @@ function parseRoute() {
   }
   if (hash === '#/home') return { view: 'home' };
   if (hash === '#/admin') return { view: 'admin' };
+  if (hash === '#/domain') return { view: 'domain' };
   if (hash === '#/login') return { view: 'login' };
   return { view: token ? 'home' : 'login' };
 }
@@ -515,6 +536,9 @@ function render() {
   } else if (r.view === 'admin') {
     setPresenceView('admin');
     currentView = adminView(app);
+  } else if (r.view === 'domain') {
+    setPresenceView('domain');
+    currentView = domainView(app);
   } else {
     setPresenceView('home');
     currentView = homeView(app);
@@ -2093,15 +2117,17 @@ function adminView(app) {
   const newRole = h('select', { id: 'admin-new-role', class: 'input input-sm' },
     h('option', { value: 'user' }, 'user'),
     h('option', { value: 'admin' }, 'admin'));
+  const newDomain = h('select', { id: 'admin-new-domain', class: 'input input-sm' },
+    h('option', { value: 'default' }, 'default'));
   const createBtn = h('button', {
     id: 'admin-create', class: 'btn btn-primary btn-sm', type: 'submit',
   }, 'Create user');
   const createForm = h('form', { class: 'admin-create-form', onsubmit: createUser },
-    newUser, newPass, newRole, createBtn);
+    newUser, newPass, newRole, newDomain, createBtn);
 
   const auHead = h('div', { class: 'au-head' },
     h('span', null, 'Username'), h('span', null, 'Role'),
-    h('span', null, 'Online'), h('span', null, ''));
+    h('span', null, 'Domain'), h('span', null, 'Online'), h('span', null, ''));
   const auPanel = h('section', { class: 'panel' },
     h('div', { class: 'panel-head' }, h('h2', null, 'Users')),
     auHead,
@@ -2164,9 +2190,62 @@ function adminView(app) {
     }
   }
 
+  /* ── monitoring: live CPU / memory / per-domain load (SE-7) ── */
+  const monTiles = h('div', { class: 'metrics-strip' });
+  const monHead = h('div', { class: 'mon-head' },
+    h('span', null, 'Domain'), h('span', null, 'Owner'),
+    h('span', { class: 'num' }, 'Users'), h('span', { class: 'num' }, 'Online'),
+    h('span', { class: 'num' }, 'Sessions'), h('span', { class: 'num' }, 'Captures'),
+    h('span', { class: 'num' }, 'Storage'), h('span', { class: 'num' }, 'Req/min'),
+    h('span', { class: 'num' }, 'WS'));
+  const monBox = h('div', { class: 'admin-mon' },
+    h('div', { class: 'empty' }, 'Loading…'));
+  const monPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Monitoring'),
+      h('span', { class: 'dim small' }, 'process & per-domain load · refreshes every 5 s')),
+    monTiles, monHead, monBox);
+
+  /* ── domains: create / delete tenants (SE-5) ── */
+  const domNewId = h('input', { class: 'input input-sm mono', placeholder: 'domain id (a-z0-9-)', spellcheck: 'false', autocomplete: 'off' });
+  const domNewName = h('input', { class: 'input input-sm', placeholder: 'display name (optional)' });
+  const domNewOwner = h('input', { class: 'input input-sm mono', placeholder: 'owner username', spellcheck: 'false', autocomplete: 'off' });
+  const domNewOwnerPass = h('input', { class: 'input input-sm', type: 'password', placeholder: 'owner password (new account)', autocomplete: 'new-password' });
+  const domCreateBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'submit' }, 'Create domain');
+  const domForm = h('form', { class: 'admin-create-form', onsubmit: createDomain },
+    domNewId, domNewName, domNewOwner, domNewOwnerPass, domCreateBtn);
+  const domHead = h('div', { class: 'dm-head' },
+    h('span', null, 'Domain'), h('span', null, 'Owner'),
+    h('span', { class: 'num' }, 'Users'), h('span', { class: 'num' }, 'Sessions'),
+    h('span', { class: 'num' }, 'Captures'), h('span', null, ''));
+  const domBox = h('div', { class: 'admin-domains' }, h('div', { class: 'empty' }, 'Loading…'));
+  const domPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Domains'),
+      h('span', { class: 'dim small' }, 'isolated tenants — data never crosses domains')),
+    h('p', { class: 'dim small' },
+      'Each domain owns its captures, sessions, folders and device names. '
+      + 'Create one with an owner who then manages that domain’s own users. '
+      + 'The built-in ', h('span', { class: 'mono' }, 'default'), ' domain cannot be removed.'),
+    domHead, domBox, domForm);
+
+  /* ── security: flow monitor alerts + sampled flows (SE-7) ── */
+  const secSummary = h('div', { class: 'sec-summary dim small' }, 'Loading…');
+  const secAlerts = h('div', { class: 'sec-alerts' });
+  const secSamples = h('div', { class: 'sec-samples' });
+  const secPanel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Security'),
+      h('span', { class: 'dim small' }, 'flow sampling & anomaly detection')),
+    secSummary,
+    h('h3', { class: 'sec-sub' }, 'Alerts'),
+    secAlerts,
+    h('h3', { class: 'sec-sub' }, 'Sampled flows'),
+    secSamples);
+
   app.appendChild(
     h('div', { class: 'home admin' },
       metricsBox,
+      monPanel,
+      secPanel,
+      domPanel,
       auPanel,
       apPanel,
       storagePanel,
@@ -2176,6 +2255,123 @@ function adminView(app) {
   makeColsResizable(apHead, apPanel, '--apcols', 'admin-presence');
   loadStorage();
 
+  async function createDomain(ev) {
+    ev.preventDefault();
+    const id = domNewId.value.trim();
+    const owner = domNewOwner.value.trim();
+    if (!id || !owner) { toast('domain id and owner are required', 'error'); return; }
+    domCreateBtn.disabled = true;
+    try {
+      await api('/api/admin/domains', { method: 'POST', json: {
+        id, name: domNewName.value.trim(), owner,
+        owner_password: domNewOwnerPass.value,
+      } });
+      toast('domain ' + id + ' created (owner ' + owner + ')');
+      domNewId.value = ''; domNewName.value = ''; domNewOwner.value = ''; domNewOwnerPass.value = '';
+      refresh();
+    } catch (err) {
+      toast('create domain: ' + err.message, 'error');
+    } finally {
+      domCreateBtn.disabled = false;
+    }
+  }
+
+  async function deleteDomain(d) {
+    const has = (d.sessions || 0) + (d.pcaps || 0) > 0;
+    const msg = has
+      ? 'Domain "' + d.id + '" holds ' + d.pcaps + ' capture(s) and ' + d.sessions
+        + ' session(s). Delete the domain AND all its data? Its users move to the default domain.'
+      : 'Delete domain "' + d.id + '"? Its users move to the default domain.';
+    if (!window.confirm(msg)) return;
+    try {
+      await api('/api/admin/domains/' + encodeURIComponent(d.id) + (has ? '?force=1' : ''),
+        { method: 'DELETE' });
+      toast('domain ' + d.id + ' deleted');
+      refresh();
+    } catch (err) {
+      toast('delete domain: ' + err.message, 'error');
+    }
+  }
+
+  function renderMonitor(m) {
+    if (!m || !m.cpu) { monBox.replaceChildren(h('div', { class: 'empty' }, 'unavailable')); return; }
+    const memPct = m.mem && m.mem.total_kb
+      ? (100 * (1 - (m.mem.available_kb || 0) / m.mem.total_kb)) : 0;
+    monTiles.replaceChildren(
+      metric('Process CPU', (m.cpu.process_pct || 0).toFixed(0) + '%',
+        'share of one core (' + (m.cpu.cores || 1) + ' cores total)'),
+      metric('System CPU', (m.cpu.system_pct || 0).toFixed(0) + '%', 'whole host, all cores'),
+      metric('RSS', fmtBytes((m.mem.rss_kb || 0) * 1024)),
+      metric('Host memory', memPct.toFixed(0) + '% used',
+        fmtBytes((m.mem.available_kb || 0) * 1024) + ' available'),
+      metric('Uptime', fmtUptime(m.uptime_s)),
+      metric('Domains', fmtInt((m.domains || []).length)),
+    );
+    const rows = (m.domains || []).map((d) => h('div', { class: 'monrow', dataset: { domain: d.id } },
+      h('span', { class: 'mono' }, d.id + (d.id === 'default' ? '' : (d.owner ? '' : ''))),
+      h('span', { class: 'mono dim' }, d.owner || '—'),
+      h('span', { class: 'num mono' }, fmtInt(d.users)),
+      h('span', { class: 'num mono' }, fmtInt(d.online)),
+      h('span', { class: 'num mono' }, fmtInt(d.sessions) + (d.running ? ' (' + d.running + '▶)' : '')),
+      h('span', { class: 'num mono' }, fmtInt(d.pcaps)),
+      h('span', { class: 'num mono' }, fmtBytes(d.pcap_bytes)),
+      h('span', { class: 'num mono' + ((d.req_per_min || 0) > 300 ? ' hot' : '') }, fmtInt(Math.round(d.req_per_min || 0))),
+      h('span', { class: 'num mono' }, fmtInt(d.ws_clients)),
+    ));
+    monBox.replaceChildren(...(rows.length ? rows : [h('div', { class: 'empty' }, 'no domains')]));
+  }
+
+  function renderDomains(list) {
+    /* keep the create-user domain <select> in sync with the live list */
+    const opts = list.map((d) => h('option', { value: d.id }, d.id));
+    const keep = newDomain.value;
+    newDomain.replaceChildren(...opts);
+    if (list.some((d) => d.id === keep)) newDomain.value = keep;
+    if (!list.length) { domBox.replaceChildren(h('div', { class: 'empty' }, 'No domains.')); return; }
+    domBox.replaceChildren(...list.map((d) => {
+      const isDefault = d.id === 'default';
+      const del = h('button', {
+        class: 'btn btn-danger btn-sm', type: 'button', disabled: isDefault,
+        title: isDefault ? 'the built-in domain cannot be deleted' : 'delete ' + d.id,
+      }, 'Delete');
+      if (!isDefault) del.addEventListener('click', () => deleteDomain(d));
+      return h('div', { class: 'dmrow', dataset: { domain: d.id } },
+        h('span', { class: 'mono' }, isDefault ? h('span', null, d.id, h('span', { class: 'dim' }, ' (built-in)')) : d.name || d.id),
+        h('span', { class: 'mono dim' }, d.owner || '—'),
+        h('span', { class: 'num mono' }, fmtInt(d.users)),
+        h('span', { class: 'num mono' }, fmtInt(d.sessions)),
+        h('span', { class: 'num mono' }, fmtInt(d.pcaps)),
+        h('span', null, del));
+    }));
+  }
+
+  function renderSecurity(s) {
+    if (!s) { secSummary.textContent = 'unavailable'; return; }
+    const alerts = s.alerts || [], samples = s.samples || [];
+    secSummary.replaceChildren(
+      h('span', null, fmtInt(s.recorded) + ' flows sampled · '),
+      h('span', { class: alerts.length ? 'errtext' : '' },
+        fmtInt(alerts.length) + ' active alert' + (alerts.length === 1 ? '' : 's')),
+      h('span', null, ' · ' + fmtInt(s.suspect) + ' suspect'));
+    if (!alerts.length) {
+      secAlerts.replaceChildren(h('div', { class: 'empty' }, 'No alerts — traffic looks normal.'));
+    } else {
+      secAlerts.replaceChildren(...alerts.slice(0, 40).map((a) => h('div', { class: 'sec-alert' },
+        h('span', { class: 'sbadge st-bad sm' }, a.kind),
+        h('span', { class: 'mono dim' }, a.actor + (a.domain ? ' · ' + a.domain : '')),
+        h('span', { class: 'sec-detail' }, a.detail),
+        h('span', { class: 'sec-time mono dim' }, (a.ts || '').replace('T', ' ').replace('Z', ''))
+      )));
+    }
+    secSamples.replaceChildren(...(samples.length ? samples.slice(0, 40).map((f) => h('div',
+      { class: 'sec-sample' + (f.verdict === 'suspect' ? ' bad' : '') },
+      h('span', { class: 'sbadge sm ' + (f.verdict === 'suspect' ? 'st-bad' : 'st-good') }, f.verdict),
+      h('span', { class: 'mono dim' }, f.actor),
+      h('span', { class: 'mono' }, f.method + ' ' + f.path),
+      h('span', { class: 'num mono ' + (f.status >= 400 ? 'errtext' : 'dim') }, f.status),
+    )) : [h('div', { class: 'empty' }, 'no flows sampled yet')]));
+  }
+
   async function createUser(ev) {
     ev.preventDefault();
     const u = newUser.value.trim();
@@ -2184,9 +2380,12 @@ function adminView(app) {
     createBtn.disabled = true;
     try {
       await api('/api/admin/users', {
-        method: 'POST', json: { username: u, password: p, role: newRole.value },
+        method: 'POST', json: {
+          username: u, password: p, role: newRole.value,
+          domain: newDomain.value || 'default',
+        },
       });
-      toast('user ' + u + ' created (' + newRole.value + ')');
+      toast('user ' + u + ' created (' + newRole.value + ' · ' + (newDomain.value || 'default') + ')');
       newUser.value = '';
       newPass.value = '';
       refresh();
@@ -2232,6 +2431,7 @@ function adminView(app) {
         h('span', null, h('span', {
           class: 'sbadge ' + (u.role === 'admin' ? 'st-warn' : 'st-neutral'),
         }, u.role || 'user')),
+        h('span', { class: 'mono dim' }, u.domain || 'default'),
         h('span', { class: 'au-online' },
           h('span', { class: 'online-dot' + (u.online ? ' on' : '') }),
           u.online
@@ -2264,6 +2464,9 @@ function adminView(app) {
       api('/api/admin/users'),
       api('/api/presence'),
       api('/api/metrics'),
+      api('/api/admin/monitor'),
+      api('/api/admin/domains'),
+      api('/api/admin/security'),
     ]);
     if (!alive) return;
     if (results[0].status === 'fulfilled') renderUsers(results[0].value.users || []);
@@ -2271,10 +2474,15 @@ function adminView(app) {
     if (results[1].status === 'fulfilled') renderPresenceTable(results[1].value.users || []);
     else presBox.replaceChildren(h('div', { class: 'empty errtext' }, results[1].reason.message));
     if (results[2].status === 'fulfilled') metricsBox.replaceChildren(...metricTiles(results[2].value));
+    if (results[3].status === 'fulfilled') renderMonitor(results[3].value);
+    if (results[4].status === 'fulfilled') renderDomains(results[4].value.domains || []);
+    if (results[5].status === 'fulfilled') renderSecurity(results[5].value);
   }
 
   refresh();
-  timer = setInterval(refresh, 10000);
+  makeColsResizable(monHead, monPanel, '--moncols', 'admin-mon');
+  makeColsResizable(domHead, domPanel, '--dmcols', 'admin-domains');
+  timer = setInterval(refresh, 5000);
 
   return {
     destroy() {
@@ -2282,6 +2490,95 @@ function adminView(app) {
       clearInterval(timer);
     },
   };
+}
+
+/* ─────────────────── domain owner self-service view ───────────────────
+   A domain owner (not a global admin) manages just the users of their own
+   domain: create regular accounts, delete non-owner ones. */
+function domainView(app) {
+  let alive = true;
+  let timer = 0;
+
+  const usersBox = h('div', { class: 'admin-users' }, h('div', { class: 'empty' }, 'Loading…'));
+  const newUser = h('input', { class: 'input input-sm mono', placeholder: 'username', spellcheck: 'false', autocomplete: 'off' });
+  const newPass = h('input', { class: 'input input-sm', type: 'password', placeholder: 'password (≥ 8 chars)', autocomplete: 'new-password' });
+  const createBtn = h('button', { class: 'btn btn-primary btn-sm', type: 'submit' }, 'Add user');
+  const createForm = h('form', { class: 'admin-create-form', onsubmit: createUser }, newUser, newPass, createBtn);
+  const head = h('div', { class: 'au-head dom-au-head' },
+    h('span', null, 'Username'), h('span', null, 'Role'), h('span', null, ''));
+  const title = h('h2', null, 'My domain');
+  const sub = h('span', { class: 'dim small' }, '');
+  const panel = h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, title, sub),
+    h('p', { class: 'dim small' },
+      'You are the owner of this domain. Accounts you create here can see only '
+      + 'this domain’s captures and sessions — never another domain’s data.'),
+    head, usersBox, createForm);
+  app.appendChild(h('div', { class: 'home admin' }, panel));
+
+  async function createUser(ev) {
+    ev.preventDefault();
+    const u = newUser.value.trim(); const p = newPass.value;
+    if (!u || !p) { toast('username and password are required', 'error'); return; }
+    createBtn.disabled = true;
+    try {
+      await api('/api/domain/users', { method: 'POST', json: { username: u, password: p } });
+      toast('user ' + u + ' added to ' + domain);
+      newUser.value = ''; newPass.value = '';
+      refresh();
+    } catch (err) {
+      toast('add user: ' + err.message, 'error');
+    } finally { createBtn.disabled = false; }
+  }
+
+  async function deleteUser(name) {
+    if (!window.confirm('Remove user "' + name + '" from your domain? Their tokens are revoked immediately.')) return;
+    try {
+      await api('/api/domain/users/' + encodeURIComponent(name), { method: 'DELETE' });
+      toast('user ' + name + ' removed');
+      refresh();
+    } catch (err) {
+      toast('remove user: ' + err.message, 'error');
+    }
+  }
+
+  function renderUsers(d) {
+    title.textContent = 'Domain: ' + (d.name || d.id);
+    sub.textContent = 'owner ' + (d.owner || '—');
+    const users = d.users || [];
+    if (!users.length) { usersBox.replaceChildren(h('div', { class: 'empty' }, 'No users.')); return; }
+    usersBox.replaceChildren(...users.map((u) => {
+      const locked = u.owner || u.username === username || u.role === 'admin';
+      const del = h('button', {
+        class: 'btn btn-danger btn-sm', type: 'button', disabled: locked,
+        title: u.owner ? 'the domain owner cannot be removed here'
+          : u.username === username ? 'you cannot remove your own account'
+          : u.role === 'admin' ? 'admins are managed globally'
+          : 'remove ' + u.username,
+      }, 'Remove');
+      if (!locked) del.addEventListener('click', () => deleteUser(u.username));
+      return h('div', { class: 'aurow dom-aurow' },
+        h('span', { class: 'au-name mono' }, u.username + (u.owner ? ' ★' : '')),
+        h('span', null, h('span', { class: 'sbadge ' + (u.role === 'admin' ? 'st-warn' : 'st-neutral') }, u.role || 'user')),
+        h('span', { class: 'au-actions' }, del));
+    }));
+  }
+
+  async function refresh() {
+    if (!alive) return;
+    try {
+      const d = await api('/api/domain');
+      if (!alive) return;
+      if (!d.is_owner) { usersBox.replaceChildren(h('div', { class: 'empty' }, 'You do not own a domain.')); return; }
+      renderUsers(d);
+    } catch (err) {
+      usersBox.replaceChildren(h('div', { class: 'empty errtext' }, err.message));
+    }
+  }
+
+  refresh();
+  timer = setInterval(refresh, 10000);
+  return { destroy() { alive = false; clearInterval(timer); } };
 }
 
 /* ────────────────────────── session view ────────────────────────── */

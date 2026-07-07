@@ -64,6 +64,7 @@ struct AnalysisState {
 struct Session {
     std::string id, name, pcapId, path, createdAt;
     std::string pcapFilePath; // resolved file the analysis ran on
+    std::string domain = "default"; // owning tenant domain (SE-5)
 
     enum Status { Running = 0, Done = 1, Error = 2 };
     std::atomic<int> status{Running};

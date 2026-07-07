@@ -47,7 +47,10 @@ bool Auth::init(const std::string& usersFile, std::string& err) {
             std::string hash = u.getStr("hash");
             std::string role = u.getStr("role", "user");
             if (role != "admin") role = "user";
-            if (!name.empty() && !hash.empty()) mUsers[name] = {hash, role};
+            // Pre-domain users.json entries join the built-in domain (SE-5).
+            std::string domain = u.getStr("domain", "default");
+            if (domain.empty()) domain = "default";
+            if (!name.empty() && !hash.empty()) mUsers[name] = {hash, role, domain};
         }
     }
     return true;
@@ -61,6 +64,7 @@ bool Auth::save(std::string& err) {
         w.kv("username", name);
         w.kv("hash", u.hash);
         w.kv("role", u.role);
+        w.kv("domain", u.domain.empty() ? "default" : u.domain);
         w.endObj();
     }
     w.endArr().endObj();
@@ -83,7 +87,7 @@ bool Auth::save(std::string& err) {
 
 bool Auth::registerUser(const std::string& username,
                         const std::string& password, std::string& err,
-                        const std::string& role) {
+                        const std::string& role, const std::string& domain) {
     if (!validUsername(username)) {
         err = "username must be 3-32 chars of [a-zA-Z0-9_.-]";
         return false;
@@ -104,7 +108,8 @@ bool Auth::registerUser(const std::string& username,
         err = "hashing failed (out of memory?)";
         return false;
     }
-    mUsers[username] = {hash, role == "admin" ? "admin" : "user"};
+    mUsers[username] = {hash, role == "admin" ? "admin" : "user",
+                        domain.empty() ? "default" : domain};
     return save(err);
 }
 
@@ -114,11 +119,39 @@ std::string Auth::roleOf(const std::string& username) const {
     return it == mUsers.end() ? std::string() : it->second.role;
 }
 
+std::string Auth::domainOf(const std::string& username) const {
+    std::lock_guard lk(mMu);
+    auto it = mUsers.find(username);
+    if (it == mUsers.end()) return {};
+    return it->second.domain.empty() ? "default" : it->second.domain;
+}
+
+Auth::UserInfo Auth::infoOf(const std::string& username) const {
+    std::lock_guard lk(mMu);
+    auto it = mUsers.find(username);
+    if (it == mUsers.end()) return {};
+    return {username, it->second.role,
+            it->second.domain.empty() ? "default" : it->second.domain};
+}
+
+bool Auth::setDomain(const std::string& username, const std::string& domain,
+                     std::string& err) {
+    std::lock_guard lk(mMu);
+    auto it = mUsers.find(username);
+    if (it == mUsers.end()) {
+        err = "no such user";
+        return false;
+    }
+    it->second.domain = domain.empty() ? "default" : domain;
+    return save(err);
+}
+
 std::vector<Auth::UserInfo> Auth::users() const {
     std::lock_guard lk(mMu);
     std::vector<UserInfo> out;
     out.reserve(mUsers.size());
-    for (auto& [name, u] : mUsers) out.push_back({name, u.role});
+    for (auto& [name, u] : mUsers)
+        out.push_back({name, u.role, u.domain.empty() ? "default" : u.domain});
     return out;
 }
 

@@ -359,13 +359,18 @@ def phase_main():
                if t == "batch")
     check(got2 == total, "second client receives the same stream (BE-7)")
 
-    # Open a capture by server path, then delete the session.
-    st, r = req("POST", "/api/sessions",
+    # Opening a capture by server path is a host-filesystem read — admin only
+    # (SE-5). A regular user is refused with 403.
+    st, _ = req("POST", "/api/sessions",
                 {"path": os.path.abspath("testdata/adp.pcap")}, token=token)
-    check(st == 201, "session from server path")
+    check(st == 403, "server path open refused for non-admin")
+    # As admin it works; then delete the session.
+    st, r = req("POST", "/api/sessions",
+                {"path": os.path.abspath("testdata/adp.pcap")}, token=atok)
+    check(st == 201, "session from server path (admin)")
     sid2 = r["id"]
-    wait_done(token, sid2)
-    st, _ = req("DELETE", f"/api/sessions/{sid2}", token=token)
+    wait_done(atok, sid2)
+    st, _ = req("DELETE", f"/api/sessions/{sid2}", token=atok)
     check(st == 200, "session delete")
     st, _ = req("GET", f"/api/sessions/{sid2}", token=token)
     check(st == 404, "deleted session gone")

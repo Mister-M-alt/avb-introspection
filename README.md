@@ -141,8 +141,12 @@ who is online and which session they are in; **Notes** are shared and
 conflict-safe (concurrent edits get a merge prompt, never a silent
 overwrite).
 
-**Admin** (admins only) — user management, live presence, and a **Storage**
-panel to change where the pcap library is kept on disk.
+**Admin** (admins only) — user management, live presence, per-domain
+**Monitoring** (CPU/memory + load), a **Security** panel (flow alerts +
+sampled flows), **Domains** (create isolated tenants and assign owners), and
+a **Storage** panel. A **domain owner** instead gets a *My domain* view to
+manage just their own domain's users. See
+[docs/SECURITY.md](docs/SECURITY.md) for exposing the server safely.
 
 ## Architecture
 
@@ -263,23 +267,49 @@ account already exists:
 AVB_ADMIN_USER=alex AVB_ADMIN_PASSWORD=change-me ./build/avb-introspectd
 ```
 
-Admins get an **Admin** panel in the UI: user management (create/delete,
-roles) and live presence. Everyone sees the presence indicator in the
-header — who is online and which session they are looking at — and
-concurrent notes editing is conflict-safe (revision check with a merge
-prompt instead of silent overwrites).
+Admins get an **Admin** panel: user management, per-domain **Monitoring**
+(process CPU/memory and per-domain load), a **Security** panel (flow alerts +
+sampled flows), **Domains**, and storage. Everyone sees the presence
+indicator in the header, and concurrent notes editing is conflict-safe.
 
-**Multi-domain outlook:** the tool is designed to eventually serve users
-from different domains (teams/organizations) with full isolation between
-them — domain-scoped data, authorization, quotas, and presence. The agreed
-design is documented in REQUIREMENTS.md §10 ("Multi-user domains — v2
-outlook").
+### Multi-tenant domains (SE-5)
 
-### Remote deployment
+One deployment serves several teams/organizations with **full data
+isolation**. Every user belongs to one *domain*; pcaps, folders, sessions,
+notes and device names are domain-owned, and a reference to another domain's
+object answers **404** (identical to "does not exist") so existence never
+leaks across tenants. A **global admin** (`AVB_ADMIN_USER`) manages domains
+and every user; a **domain owner** manages just their own domain's users from
+the *My domain* view. Pre-existing accounts join the built-in `default`
+domain unchanged. For mutually-untrusting tenants, run one container per
+domain (`docs/SECURITY.md` §4).
 
-`deploy/` contains an nginx reverse-proxy setup for remote access: correct
-WebSocket upgrade for `/api/ws`, 1 GiB streamed uploads, and a ready-to-
-enable TLS server block.
+### Rate limiting & flow monitoring (SE-6, SE-7)
+
+Non-admin traffic is bounded by a per-user token bucket (with a stricter
+bucket for uploads/analysis), and the unauthenticated login/register
+endpoints by a per-IP bucket applied *before* password verification (brute-
+force throttle) — over-limit requests get `429 Retry-After`. A built-in
+**flow monitor** samples every request and flags `auth-bruteforce`, `probe`,
+`path-traversal`, `rate-anomaly`, `limit-hammering` and `upload-flood`,
+raises the offender's rate-limit penalty, writes an append-only
+`security.log`, and surfaces alerts + a legit/suspect flow sample in the
+admin Security panel.
+
+![Admin Security panel — flow alerts and sampled flows](docs/img/security-panel.png)
+
+### Remote deployment & hardening
+
+`deploy/` contains an nginx reverse-proxy (TLS, HSTS/CSP/security headers,
+edge rate + connection limits, WebSocket upgrade, 1 GiB streamed uploads) and
+a **hardened systemd unit** — read-only filesystem except the data dir, no
+capabilities, seccomp allow-list, a cgroup egress firewall so a compromised
+process cannot phone home, and CPU/memory/task quotas.
+
+**[docs/SECURITY.md](docs/SECURITY.md)** is the full hardening guide: threat
+model, VLAN segmentation with default-deny egress, the OS sandbox, one-
+container-per-domain isolation, and a **verification checklist** that proves
+the box cannot be repurposed or the tenant isolation bypassed.
 
 ```bash
 docker compose -f deploy/docker-compose.yml up --build   # UI on port 80

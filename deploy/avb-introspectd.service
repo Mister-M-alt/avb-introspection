@@ -30,6 +30,15 @@ Group=avb
 # package:
 #   Environment=AVB_ADMIN_USER=alex
 #   Environment=AVB_ADMIN_PASSWORD=change-me
+# Expose the API on loopback only — nginx (which terminates TLS) is the sole
+# public listener. The app also refuses to trust X-Real-IP unless the peer is
+# loopback, so a remote client cannot forge its source IP. Bind an off-box
+# address here only if nginx runs on another machine on a trusted segment.
+#
+# Harden the deployment against brute force / open signup on exposed installs:
+#   Environment=AVB_DISABLE_REGISTRATION=1     # admins/owners create accounts
+#   Environment=AVB_RATE_RPS=30                # per non-admin user (default 30)
+#   Environment=AVB_RATE_BURST=90              # burst (default 90)
 ExecStart=/opt/avb-introspection/avb-introspectd \
     --port 8342 \
     --data /var/lib/avb-introspection \
@@ -37,9 +46,12 @@ ExecStart=/opt/avb-introspection/avb-introspectd \
 Restart=on-failure
 RestartSec=2
 
-# Hardening — the daemon only needs its data directory.
+# ── Hardening (see docs/SECURITY.md §3) ──────────────────────────────────
+# The goal: a full compromise of the process can touch nothing but its own
+# data directory and cannot open an outbound connection.
+#
 # If an admin points the pcap library at a path outside the data dir
-# (Admin → Storage), add that path here too, e.g.:
+# (Admin → Storage), add that path to ReadWritePaths too, e.g.:
 #   ReadWritePaths=/var/lib/avb-introspection /mnt/captures
 # otherwise ProtectSystem=strict makes the new root read-only and the change
 # is rejected with a "not writable by the service" error.
@@ -48,9 +60,47 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/avb-introspection
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
 RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+# Drop every Linux capability — the daemon needs none.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Only ordinary sockets (no AF_PACKET raw-packet spoofing, no AF_NETLINK).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# cgroup-level egress firewall: the process literally cannot connect anywhere
+# but loopback — it cannot phone home even if the host firewall is missing.
+# This ALSO blocks inbound from off-box, which is what you want when nginx runs
+# on THIS host (the recommended layout: nginx terminates TLS and proxies to
+# 127.0.0.1:8342). If you expose :8342 directly (no local nginx) or nginx runs
+# on another machine, add that source so users/proxy can still reach it, e.g.:
+#   IPAddressAllow=localhost 192.168.0.0/16
+IPAddressAllow=localhost
+IPAddressDeny=any
+# seccomp allow-list: @reboot, @swap, @module, @raw-io, @mount, … are denied.
+# @process stays allowed so the daemon can fork/exec the decompression tools.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+UMask=0077
+
+# ── Resource quotas — one tenant or a decode storm cannot down the host ──
+CPUQuota=200%
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=256
+LimitNOFILE=8192
 
 [Install]
 WantedBy=multi-user.target

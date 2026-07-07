@@ -19,13 +19,15 @@ class Auth {
 public:
     struct UserInfo {
         std::string username, role; // role: "admin" | "user"
+        std::string domain;         // tenant domain (SE-5); "default" built-in
     };
 
     /** Loads users from `usersFile` (created on first save). */
     bool init(const std::string& usersFile, std::string& err);
 
     bool registerUser(const std::string& username, const std::string& password,
-                      std::string& err, const std::string& role = "user");
+                      std::string& err, const std::string& role = "user",
+                      const std::string& domain = "default");
     /** On success fills `token` (64 hex chars). */
     bool login(const std::string& username, const std::string& password,
                std::string& token);
@@ -34,6 +36,12 @@ public:
     void logout(const std::string& token);
 
     std::string roleOf(const std::string& username) const;
+    std::string domainOf(const std::string& username) const;
+    /** Username+role+domain in one lock; username empty when unknown. */
+    UserInfo infoOf(const std::string& username) const;
+    /** Move a user into another domain (domain create / owner assignment). */
+    bool setDomain(const std::string& username, const std::string& domain,
+                   std::string& err);
     std::vector<UserInfo> users() const;
     /** True once at least one admin account exists. False = fresh deployment
      *  that still needs its first admin (bootstrap). */
@@ -51,7 +59,7 @@ public:
 
 private:
     struct User {
-        std::string hash, role;
+        std::string hash, role, domain;
     };
     bool save(std::string& err);
 

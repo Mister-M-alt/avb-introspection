@@ -102,6 +102,7 @@ int main(int argc, char** argv) {
         s->pcapId = meta.pcapId;
         s->path = meta.path;
         s->createdAt = meta.createdAt;
+        s->domain = meta.domain;
         s->pcapFilePath = store.sessionPcapPath(meta.id);
         engine.start(s);
         ++restored;
