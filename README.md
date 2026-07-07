@@ -306,10 +306,13 @@ a **hardened systemd unit** — read-only filesystem except the data dir, no
 capabilities, seccomp allow-list, a cgroup egress firewall so a compromised
 process cannot phone home, and CPU/memory/task quotas.
 
-**[docs/SECURITY.md](docs/SECURITY.md)** is the full hardening guide: threat
-model, VLAN segmentation with default-deny egress, the OS sandbox, one-
-container-per-domain isolation, and a **verification checklist** that proves
-the box cannot be repurposed or the tenant isolation bypassed.
+**[docs/SECURITY.md](docs/SECURITY.md)** is the full hardening guide (threat
+model, OS sandbox, one-container-per-domain isolation, and a **verification
+checklist** proving the box can't be repurposed or tenant isolation bypassed),
+and **[docs/NETWORK.md](docs/NETWORK.md)** is the network template: VLAN plan +
+inter-VLAN ACLs wiring together three fill-in-the-blanks files —
+`deploy/nginx.production.conf` (TLS reverse proxy), `deploy/firewall.nft`
+(default-deny host egress), and the hardened systemd unit.
 
 ```bash
 docker compose -f deploy/docker-compose.yml up --build   # UI on port 80

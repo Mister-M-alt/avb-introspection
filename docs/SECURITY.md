@@ -16,6 +16,16 @@ do **not** trust the application alone. The network, the reverse proxy and the
 OS sandbox each independently contain it, so that a bug in one layer is caught
 by the next.
 
+**Ready-to-fill templates** implement everything below — see
+**[docs/NETWORK.md](NETWORK.md)** for the VLAN plan and inter-VLAN ACLs that
+tie them together:
+
+| Template | Role |
+| --- | --- |
+| [`deploy/nginx.production.conf`](../deploy/nginx.production.conf) | TLS reverse proxy — the only public listener (§5) |
+| [`deploy/firewall.nft`](../deploy/firewall.nft) | host firewall — default-deny egress (§2c) |
+| [`deploy/avb-introspectd.service`](../deploy/avb-introspectd.service) | systemd sandbox (§3) |
+
 ---
 
 ## 1. What you are exposing, and the threat model
@@ -103,7 +113,8 @@ so the capture network and the management/service network never bridge.
 ### 2c. Host firewall (belt-and-braces, on the app host itself)
 
 Even inside its VLAN, lock the host down with `nftables` so a compromise cannot
-open outbound sockets:
+open outbound sockets. A ready-to-fill template is at
+**[`deploy/firewall.nft`](../deploy/firewall.nft)** — the essentials:
 
 ```nft
 table inet filter {
@@ -233,8 +244,11 @@ in-process domains for that customer's internal *teams*.
 
 ## 5. Reverse proxy hardening (nginx)
 
-`deploy/nginx.conf` ships with the hardening below (uncomment the TLS server
-and provide certs). Highlights:
+Use **[`deploy/nginx.production.conf`](../deploy/nginx.production.conf)** — the
+production TLS template: fill in a handful of placeholders (FQDN, upstream,
+cert paths) and drop it into `/etc/nginx/conf.d/`. (`deploy/nginx.conf` is the
+simpler port-80 config the docker-compose stack uses.) Both ship with the
+hardening below:
 
 - **TLS only** in production: HSTS, TLS 1.2/1.3, modern ciphers; redirect
   80→443.

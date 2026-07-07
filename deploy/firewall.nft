@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: 2026 Kebag-Logic
+# SPDX-License-Identifier: MIT
+#
+# ===========================================================================
+#  Host firewall TEMPLATE (nftables) for the avb-introspectd host.
+# ===========================================================================
+#
+# The important half is the OUTPUT chain: it is default-DROP, so a compromised
+# process cannot open outbound connections (become a miner, pivot, phone home).
+# This backs up systemd's cgroup egress firewall (IPAddressDeny=any) — two
+# independent layers. Rationale + verification: docs/SECURITY.md §2c, §8b.
+#
+# ---- Fill in these placeholders -------------------------------------------
+#   __NGINX_IP__    the ONLY source allowed to reach the app port 8342.
+#                   Use 127.0.0.1 if nginx runs on THIS host (recommended);
+#                   otherwise the nginx host's IP on the app VLAN.
+#   __BASTION_IP__  the only source allowed to SSH in (a jump host). Drop the
+#                   SSH rule entirely if you administer via console only.
+#   __DNS_IP__ / __NTP_IP__   your internal resolver / time server, if the host
+#                   needs name resolution / clock sync. Remove if it needs neither.
+#
+# ---- Apply ----------------------------------------------------------------
+#   sudo cp deploy/firewall.nft /etc/nftables.conf     # (after filling in)
+#   sudo nft -c -f /etc/nftables.conf                  # syntax check
+#   sudo systemctl enable --now nftables
+#
+# WARNING: a default-drop OUTPUT chain will break anything the host legitimately
+# needs to reach (package updates, syslog shipping, ...). Add those explicitly.
+# Test over console or with a timed `nft flush ruleset` safety net so a mistake
+# does not lock you out.
+# ===========================================================================
+
+flush ruleset
+
+table inet filter {
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        ct state invalid drop
+        iif "lo" accept
+
+        # Only nginx may reach the app API port.
+        ip saddr __NGINX_IP__ tcp dport 8342 accept
+
+        # If nginx runs ON this host and faces the users directly, also allow
+        # the public web ports (remove if nginx is on a separate host):
+        # tcp dport { 80, 443 } accept
+
+        # Management SSH from the bastion only (remove if console-only):
+        ip saddr __BASTION_IP__ tcp dport 22 accept
+
+        # ICMP echo for reachability checks (optional):
+        ip protocol icmp icmp type echo-request accept
+        ip6 nexthdr icmpv6 accept
+
+        # Log a sample of what gets dropped (rate-limited), then drop.
+        limit rate 5/minute log prefix "nft-input-drop "
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+
+        ct state established,related accept
+        oif "lo" accept
+
+        # Replies to nginx (and to SSH) ride the established rule above; no new
+        # outbound is needed for serving. Allow ONLY what the host genuinely
+        # originates — delete the ones you do not use:
+        ip daddr __DNS_IP__ udp dport 53 accept
+        ip daddr __DNS_IP__ tcp dport 53 accept
+        ip daddr __NTP_IP__ udp dport 123 accept
+
+        # Everything else outbound is dropped and LOGGED. A hit here is your
+        # early warning that a process is trying to pivot — ship it to your SIEM.
+        limit rate 10/minute log prefix "nft-egress-drop "
+        counter drop
+    }
+}
