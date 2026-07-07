@@ -27,6 +27,12 @@ re-time to that moment; with nothing selected they show the final observed
 state. Click any **transition** to list the event(s) that drove it, each
 linking straight to its triggering packet.
 
+The tool is **multi-user**: several analysts can be logged in and monitoring
+in parallel — even inside the same session — each with their own timeline
+cursor and filters. The header's presence indicator shows who is online and
+which session they are looking at, and shared investigation notes are
+conflict-safe under concurrent editing.
+
 The tool is an *observer* — it decodes and correlates traffic; generating
 traffic is [TSN-GEN]'s job. See [REQUIREMENTS.md](REQUIREMENTS.md) for the
 full requirements, [docs/API.md](docs/API.md) for the API contract, and
@@ -125,6 +131,15 @@ re-times to that moment (the "as of" cursor). The right pane's tabs:
 - **Notes** — markdown investigation notes (autosaved, conflict-safe for
   concurrent editors). **Markers** — your own timeline bookmarks. **Info** —
   capture/file/session details and per-device naming.
+
+**Monitoring in parallel.** The tool is built for several users at once:
+everyone has their own account, and any number of analysts can open the
+**same session simultaneously** — each keeps an independent timeline cursor,
+selection and filters, so two people can inspect different moments of the
+same capture side by side. The **presence indicator** in the header shows
+who is online and which session they are in; **Notes** are shared and
+conflict-safe (concurrent edits get a merge prompt, never a silent
+overwrite).
 
 **Admin** (admins only) — user management, live presence, and a **Storage**
 panel to change where the pcap library is kept on disk.
