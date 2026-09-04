@@ -79,7 +79,11 @@ def run_tests(page, url):
     pcap = os.path.join(ROOT, "testdata", "milan_scenario.pcap")
     page.locator("input[type=file]").set_input_files(pcap)
 
-    # Upload triggers session creation and navigation to the session view.
+    # An upload lands in the library; Analyze on its row starts the session
+    # and navigates to the session view.
+    row = page.locator(".prow", has_text="milan_scenario")
+    expect(row).to_be_visible(timeout=15000)
+    row.get_by_role("button", name="Analyze").click()
     page.wait_for_url("**/#/session/*", timeout=15000)
 
     # ---- analysis completes, events arrive -------------------------------
@@ -409,9 +413,8 @@ def run_tests(page, url):
     for f in ("combine_part1.pcap", "combine_part2.pcap"):
         page.locator("input[type=file]").set_input_files(
             os.path.join(ROOT, "testdata", f))
-        page.wait_for_url("**/#/session/*", timeout=15000)
-        page.locator('a[href="#/home"]').first.click()
-        page.wait_for_timeout(600)
+        # uploads land in the library (no session, no navigation)
+        expect(page.locator(".prow", has_text=f.replace(".pcap", ""))).to_be_visible(timeout=15000)
     # ticking two library pcaps reveals the combine bar
     expect(page.locator(".combine-bar")).to_be_hidden()
     page.locator(".prow", has_text="combine_part1").locator(".prow-chk").check()
