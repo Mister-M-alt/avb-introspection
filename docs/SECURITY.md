@@ -10,6 +10,11 @@ of your systems**, the built-in protections (multi-tenant domains, rate
 limiting, flow monitoring), and a concrete **verification checklist** you run
 to prove the box cannot be repurposed or bypassed.
 
+**Where this fits:** the reasoning and the verification matrix behind
+deployment **Levels 3 and 4** of [DEPLOYMENT.md](DEPLOYMENT.md) (a hardened
+single host; a segmented two-host network), and §4 behind Level 5's tenant
+model. The levels are the recipes; this is the rationale.
+
 The guiding principle is *defence in depth*: the application enforces
 authentication, tenant isolation, rate limits and anomaly detection; but you
 do **not** trust the application alone. The network, the reverse proxy and the
@@ -75,10 +80,11 @@ keep `avb-introspectd` on loopback (or a private, firewalled segment).
 Internet / corp LAN ──▶ nginx :443 (TLS) ──▶ 127.0.0.1:8342 avb-introspectd
 ```
 
-- Run the backend with the port bound to localhost only. The systemd unit
-  restricts it to loopback with `IPAddressAllow=localhost` +
-  `IPAddressDeny=any` (§3), so even if a firewall rule is missing the socket
-  is unreachable from off-box.
+- Run the backend bound to loopback: `--bind 127.0.0.1` (the shipped unit's
+  default). The unit additionally restricts it with `IPAddressAllow=localhost`
+  + `IPAddressDeny=any` (§3), so even a misconfigured `--bind` or a missing
+  firewall rule leaves the socket unreachable from off-box — two independent
+  layers.
 - nginx is the *only* process with a public listener.
 
 ### 2b. VLAN segmentation (recommended for anything beyond a small team)
@@ -264,9 +270,17 @@ hardening below:
 - **Do not leak the backend:** `proxy_hide_header` the server token; the app is
   reached only via the proxy.
 
-The app trusts `X-Real-IP`/`X-Forwarded-For` **only from a loopback peer**, so
-a remote client cannot forge its source IP to escape the per-IP limiter; set
-`proxy_set_header X-Real-IP $remote_addr;` at the proxy.
+The app trusts `X-Real-IP`/`X-Forwarded-For` **only from a loopback peer or
+from the addresses in `AVB_TRUSTED_PROXIES`**, so a remote client cannot forge
+its source IP to escape the per-IP limiter; set
+`proxy_set_header X-Real-IP $remote_addr;` at the proxy. With nginx on the
+same host nothing else is needed. With nginx **in another container or on
+another host**, list it: `AVB_TRUSTED_PROXIES=10.20.0.5` (or a CIDR) — the
+compose stacks already do this for their internal network. Skipping it does
+not merely lose accuracy: every per-IP bucket then keys on nginx's address,
+so the login throttle (§6) becomes one shared bucket and a single
+brute-forcer at 1 req/s locks *every* user out of login for as long as it
+keeps going. A malformed list is fatal at startup, never silently ignored.
 
 ---
 
@@ -417,7 +431,11 @@ of your network.
 
 ## 9. Quick checklist
 
-- [ ] TLS terminated at nginx; backend bound to `127.0.0.1:8342`, never public.
+- [ ] TLS terminated at nginx; backend bound to `127.0.0.1:8342` (`--bind`),
+      never public.
+- [ ] nginx not on loopback from the backend's view (other host/container)?
+      Then `AVB_TRUSTED_PROXIES` names it, and the admin Security panel shows
+      real client addresses.
 - [ ] App host in its **own VLAN** with **default-deny egress**; only nginx may
       reach `:8342`; SSH only from a bastion.
 - [ ] Host `nftables` output chain default-drop (+ log); systemd

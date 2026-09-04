@@ -9,6 +9,11 @@ nothing but the reverse proxy, and it cannot originate a connection to the rest
 of your systems. This is the network layer of `docs/SECURITY.md`; read that for
 the threat model and the OS-sandbox and app-level controls.
 
+**Where this fits:** deployment **Level 4** of [DEPLOYMENT.md](DEPLOYMENT.md)
+walks through this template step by step (addresses, app host, DMZ host,
+proof); this document holds the topology, the fill-in values and the
+inter-VLAN ACLs.
+
 Three files implement this template — fill in their placeholders and deploy:
 
 | File | Role |
@@ -52,9 +57,15 @@ never originate traffic anywhere.
 ```
 
 **Simplest safe collapse:** if you cannot provision VLANs, run **nginx on the
-same host** as the backend, bind the backend to `127.0.0.1:8342`, and rely on
+same host** as the backend, keep the unit's `--bind 127.0.0.1`, and rely on
 `deploy/firewall.nft` + the systemd sandbox. The app is then only reachable via
 nginx, and still cannot phone home. VLANs add defence in depth on top.
+
+In the split layout above (nginx on VLAN 20, app on VLAN 30) the backend
+instead listens on its VLAN-30 address (`--bind 10.30.0.10`), the unit's
+`IPAddressAllow=` admits the nginx host, and `AVB_TRUSTED_PROXIES=10.20.0.5`
+tells the app to believe that host's `X-Real-IP` — without it every per-IP
+limit in the app would key on nginx's address (SECURITY.md §5).
 
 ---
 
@@ -71,6 +82,8 @@ Decide these once and substitute them into the three files:
 | `__NGINX_IP__` | only source allowed to reach `:8342` | `127.0.0.1` or the nginx VLAN-20 IP |
 | `__BASTION_IP__` | only source allowed to SSH the app host | `10.40.0.5` |
 | `__DNS_IP__` / `__NTP_IP__` | internal resolver / time server (omit if unused) | `10.40.0.53` / `10.40.0.123` |
+| `--bind` (unit `ExecStart=`) | address the backend listens on | `127.0.0.1` (same host) or `10.30.0.10` (app VLAN) |
+| `AVB_TRUSTED_PROXIES` (`/etc/avb-introspection/env`) | the nginx host, when it is not loopback | `10.20.0.5` |
 
 VLAN/subnet plan (adapt to your addressing):
 
@@ -153,8 +166,9 @@ flows in the intent block.** Send the `deny ... log` hits to your SIEM.
 1. Provision VLANs + inter-VLAN ACLs (§3). Verify from a user host that only
    `443` reaches the DMZ and nothing reaches VLAN 30 directly.
 2. On the app host: fill in and apply `deploy/firewall.nft`, then install the
-   sandboxed `deploy/avb-introspectd.service`. Verify the sandbox and the
-   loopback binding.
+   sandboxed `deploy/avb-introspectd.service` (`deploy/install.sh`), with
+   `--bind` and `AVB_TRUSTED_PROXIES` set for the two-host layout. Verify the
+   sandbox and the binding.
 3. On the DMZ host: fill in and install `deploy/nginx.production.conf`, provide
    certs, `nginx -t && reload`.
 4. Run the **verification matrix in `docs/SECURITY.md` §8** — it proves, with

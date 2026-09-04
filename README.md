@@ -36,7 +36,8 @@ conflict-safe under concurrent editing.
 The tool is an *observer* — it decodes and correlates traffic; generating
 traffic is [TSN-GEN]'s job. See [REQUIREMENTS.md](REQUIREMENTS.md) for the
 full requirements, [docs/API.md](docs/API.md) for the API contract, and
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the deployment guide.
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the deployment guide — five
+levels, from a one-container quick start to hardened multi-tenant scale-out.
 
 ## Screenshots
 
@@ -66,8 +67,10 @@ event that drove it:
 ## Quick start
 
 Dependencies: `g++` (C++20), `make`, `zlib`, `libsodium` (and Python 3 for
-the test-data generator). See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for
-Docker and systemd + nginx deployments.
+the test-data generator). To *deploy* rather than build, start at
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and pick a level: 1 one container ·
+2 compose stack behind nginx · 3 systemd + nginx TLS · 4 segmented network ·
+5 multi-tenant shards.
 
 ```bash
 make -j                       # -> build/avb-introspectd
@@ -83,15 +86,18 @@ python3 tools/gen_pcaps.py    # writes Milan scenarios to testdata/
 # then upload testdata/milan_scenario.pcap in the UI
 ```
 
-### Docker (BE-3)
+### Containers — Podman / Docker (BE-3)
 
 ```bash
-docker build -t avb-introspection .
-docker run -p 8342:8342 -v avb-data:/data avb-introspection
+podman build --format docker -t avb-introspection .   # or: docker build -t …
+podman run -p 8342:8342 -v avb-data:/data avb-introspection
 ```
 
 Uploaded pcaps, sessions and user accounts persist in the `/data` volume and
-survive restarts (BE-8).
+survive restarts (BE-8). That is deployment **Level 1** in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); resource limits, hardening flags,
+health probes and **scaling out across containers** are in
+**[docs/CONTAINER.md](docs/CONTAINER.md)**.
 
 ## Using the app
 
@@ -242,11 +248,13 @@ through TSN-GEN once its serializer lands.
 ## Server options
 
 ```
+--bind ADDR         listen address                 (default 0.0.0.0; :: for IPv6)
 --port N            listen port                    (default 8342)
 --data DIR          persistent data directory      (default ./data)
 --frontend DIR      static frontend directory      (default ./frontend)
 --max-threads N     serving thread cap (CO-1)      (default 64)
 --max-upload-mb N   pcap upload limit              (default 1024)
+--version           print the build version
 ```
 
 Runtime metrics (NF-2: per-session packet rates, per-client bytes, CPU/RSS,
@@ -289,7 +297,9 @@ domain (`docs/SECURITY.md` §4).
 Non-admin traffic is bounded by a per-user token bucket (with a stricter
 bucket for uploads/analysis), and the unauthenticated login/register
 endpoints by a per-IP bucket applied *before* password verification (brute-
-force throttle) — over-limit requests get `429 Retry-After`. A built-in
+force throttle) — over-limit requests get `429 Retry-After`. Behind a
+reverse proxy the client address comes from `X-Real-IP`, believed only from
+loopback or the proxies listed in `AVB_TRUSTED_PROXIES`. A built-in
 **flow monitor** samples every request and flags `auth-bruteforce`, `probe`,
 `path-traversal`, `rate-anomaly`, `limit-hammering` and `upload-flood`,
 raises the offender's rate-limit penalty, writes an append-only
@@ -299,6 +309,12 @@ admin Security panel.
 ![Admin Security panel — flow alerts and sampled flows](docs/img/security-panel.png)
 
 ### Remote deployment & hardening
+
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** is the ladder: Level 2 (compose
+stack behind nginx), Level 3 (systemd sandbox + nginx TLS on one host), Level
+4 (DMZ proxy, app VLAN, default-deny egress) and Level 5 (a container per
+tenant, Quadlet, sizing). Each level is a complete recipe with a verification
+block.
 
 `deploy/` contains an nginx reverse-proxy (TLS, HSTS/CSP/security headers,
 edge rate + connection limits, WebSocket upgrade, 1 GiB streamed uploads) and
@@ -315,11 +331,20 @@ inter-VLAN ACLs wiring together three fill-in-the-blanks files —
 (default-deny host egress), and the hardened systemd unit.
 
 ```bash
-docker compose -f deploy/docker-compose.yml up --build   # UI on port 80
+cp deploy/env/app.env.example deploy/env/app.env    # admin credentials, mode 0600
+docker compose -f deploy/docker-compose.yml up --build -d   # UI on port 80
 ```
 
-For bare metal, point the upstream in `deploy/nginx.conf` at
-`127.0.0.1:8342` and drop it into `/etc/nginx/conf.d/`.
+For bare metal, `sudo ./deploy/install.sh` installs the hardened unit
+(loopback-bound, data dir managed by systemd, credentials in
+`/etc/avb-introspection/env`); then point the upstream in `deploy/nginx.conf`
+at `127.0.0.1:8342` and drop it into `/etc/nginx/conf.d/`.
+
+To scale past one box, shard: one container and one volume per tenant, routed
+by path prefix or subdomain — `deploy/docker-compose.scale.yml` is a ready
+three-shard stack. Replicas over a shared volume are **not** supported and
+will corrupt it; **[docs/CONTAINER.md](docs/CONTAINER.md)** §1 explains why
+and §7 covers the sharded layout.
 
 ## Notes / deviations
 
