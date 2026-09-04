@@ -88,21 +88,6 @@ std::string baseName(const std::string& path) {
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
-/** Client IP for rate limiting / flow monitoring. Behind the nginx proxy the
- *  socket peer is always the proxy — trust X-Real-IP only when the
- *  connection actually comes from localhost (a remote client cannot spoof
- *  its way past the limiter by sending the header directly). */
-std::string clientIp(const HttpRequest& req) {
-    std::string sock = req.clientAddr;
-    size_t colon = sock.find(':');
-    if (colon != std::string::npos) sock.resize(colon);
-    if (sock == "127.0.0.1") {
-        std::string real = req.header("x-real-ip");
-        if (!real.empty() && real.size() <= 45) return real;
-    }
-    return sock;
-}
-
 double envDouble(const char* name, double dflt) {
     const char* v = std::getenv(name);
     if (!v || !*v) return dflt;
@@ -132,6 +117,15 @@ Api::Api(Engine& engine, Auth& auth, Store& store, ThreadPool& pool,
     const char* noReg = std::getenv("AVB_DISABLE_REGISTRATION");
     mRegistrationDisabled = noReg && *noReg && std::string(noReg) != "0";
     mGuard.init(store.dataDir() + "/security.log");
+}
+
+std::string Api::clientIp(const HttpRequest& req) const {
+    // Behind a reverse proxy the socket peer is the proxy; its forwarded
+    // headers are honoured only when the peer is loopback or one of the
+    // configured trusted proxies, so a remote client cannot spoof its way
+    // past the per-IP limiter by sending the header itself.
+    return resolveClientIp(req.clientAddr, req.header("x-real-ip"),
+                           req.header("x-forwarded-for"), mTrustedProxies);
 }
 
 void Api::handle(HttpRequest& req, HttpResponse& resp,
@@ -1567,15 +1561,21 @@ void Api::streamSession(int fd, const std::string& sessionId,
                         const std::string& user, const std::string& addr) {
     auto s = mEngine.find(sessionId);
     if (!s) return;
-    auto client = mClients.add(addr, "ws");
+    auto client = mClients.add(addr, "ws", fd);
     client->setUser(user);
     WebSocket ws(fd);
 
     size_t sent = 0;
     auto lastProgress = std::chrono::steady_clock::now();
-    bool alive = true;
 
-    while (alive) {
+    while (true) {
+        if (mStopping.load()) {
+            // Server shutdown: say goodbye instead of holding the serving
+            // thread until the client goes away. The browser reconnects to
+            // the restarted instance on its own.
+            ws.sendClose(1001, "server shutting down");
+            break;
+        }
         // Drain available events in batches of <= 500 (docs/API.md).
         std::vector<Event> chunk;
         int st;
@@ -1614,8 +1614,8 @@ void Api::streamSession(int fd, const std::string& sessionId,
                     .endObj();
             ws.sendJsonDeflated(w.take());
             // Linger briefly answering pings so an in-flight client message
-            // is not lost to an immediate close.
-            for (int i = 0; i < 20; ++i) {
+            // is not lost to an immediate close (cut short at shutdown).
+            for (int i = 0; i < 20 && !mStopping.load(); ++i) {
                 std::string msg;
                 int opcode;
                 int pr = ws.poll(msg, opcode, 50);

@@ -14,6 +14,7 @@
 #include <sstream>
 
 #include "../pcapio/pcap_reader.h"
+#include "../util/fsutil.h"
 #include "../util/json.h"
 
 namespace avb {
@@ -213,21 +214,9 @@ bool Store::save(std::string& err) {
     w.endArr();
     w.endObj();
 
-    std::string path = mDataDir + "/meta.json";
-    std::string tmp = path + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::trunc);
-        if (!f) {
-            err = "cannot write " + tmp;
-            return false;
-        }
-        f << w.str();
-    }
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-        err = "cannot replace " + path;
-        return false;
-    }
-    return true;
+    // Crash-safe: temp file + fsync + rename (util/fsutil.h), so a power
+    // loss never leaves a torn index and a completed save is durable.
+    return writeFileAtomic(mDataDir + "/meta.json", w.str(), err);
 }
 
 // ---------------------------------------------------------------- domains -
@@ -729,25 +718,7 @@ std::string Store::readNotes(const std::string& id) const {
 bool Store::writeNotes(const std::string& id, const std::string& markdown,
                        std::string& err) {
     std::lock_guard lk(mMu);
-    std::string path = sessionNotesPath(id);
-    std::string tmp = path + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            err = "cannot write notes";
-            return false;
-        }
-        f.write(markdown.data(), (std::streamsize)markdown.size());
-        if (!f) {
-            err = "short write (disk full?)";
-            return false;
-        }
-    }
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-        err = "cannot replace notes file";
-        return false;
-    }
-    return true;
+    return writeFileAtomic(sessionNotesPath(id), markdown, err);
 }
 
 std::vector<Store::SessionMeta> Store::sessions() const {
@@ -779,21 +750,7 @@ bool Store::saveDeviceNames(std::string& err) {
         w.endObj();
     }
     w.endObj();
-    std::string path = mDataDir + "/devices.json";
-    std::string tmp = path + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::trunc);
-        if (!f) {
-            err = "cannot write " + tmp;
-            return false;
-        }
-        f << w.str();
-    }
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-        err = "cannot replace " + path;
-        return false;
-    }
-    return true;
+    return writeFileAtomic(mDataDir + "/devices.json", w.str(), err);
 }
 
 bool Store::setDeviceName(const std::string& domain, const std::string& mac,

@@ -10,6 +10,11 @@ CXXFLAGS ?= -O2 -g
 CXXFLAGS += -std=c++20 -Wall -Wextra -pthread
 LDLIBS   := -lz -lsodium -pthread
 
+# Build identity, shown by `avb-introspectd --version` and in the startup
+# banner. Defaults to `git describe`; release/container builds pass it
+# explicitly (make VERSION=1.2.0, docker build --build-arg VERSION=...).
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 BUILD    := build
 SRCDIR   := backend/src
 TESTDIR  := backend/tests
@@ -42,9 +47,11 @@ $(BUILD)/obj/%.o: $(SRCDIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
+# Only main.o carries the version string, so a changed VERSION costs one
+# object rebuild (touch it if you rebuild in place with a new VERSION).
 $(BUILD)/obj/main.o: $(SRCDIR)/main.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+	$(CXX) $(CXXFLAGS) -DAVB_VERSION='"$(VERSION)"' -MMD -MP -c -o $@ $<
 
 $(BUILD)/test-obj/%.o: $(TESTDIR)/%.cpp
 	@mkdir -p $(dir $@)

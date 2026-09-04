@@ -220,3 +220,147 @@ TEST(store_domain_id_validation) {
     CHECK(!Store::validDomainId("domains"));    // reserved (layout)
     CHECK(!Store::validDomainId(std::string(33, 'a'))); // too long
 }
+
+// ---------------------------------------------------------------------------
+// util/netaddr.h — bind/CIDR parsing and trusted-proxy client resolution
+// ---------------------------------------------------------------------------
+#include "util/netaddr.h"
+
+TEST(netaddr_parse_ip_forms) {
+    IpAddr a;
+    CHECK(parseIp("192.168.1.20", a));
+    CHECK(!a.v6);
+    CHECK_EQ(ipToString(a), std::string("192.168.1.20"));
+    CHECK(parseIp("::1", a));
+    CHECK(a.v6);
+    CHECK(isLoopback(a));
+    // IPv4-mapped IPv6 (what a dual-stack "::" listener reports) folds to v4.
+    CHECK(parseIp("::ffff:127.0.0.1", a));
+    CHECK(!a.v6);
+    CHECK(isLoopback(a));
+    CHECK_EQ(ipToString(a), std::string("127.0.0.1"));
+    CHECK(!parseIp("", a));
+    CHECK(!parseIp("not-an-ip", a));
+    CHECK(!parseIp("10.0.0.1:8342", a));
+    CHECK(!parseIp("300.1.1.1", a));
+}
+
+TEST(netaddr_cidr) {
+    IpNet n;
+    CHECK(parseCidr("10.0.0.0/8", n));
+    IpAddr a;
+    parseIp("10.200.3.4", a);
+    CHECK(n.contains(a));
+    parseIp("11.0.0.1", a);
+    CHECK(!n.contains(a));
+    CHECK(parseCidr("172.16.0.0/12", n));
+    parseIp("172.31.255.1", a);
+    CHECK(n.contains(a));
+    parseIp("172.32.0.1", a);
+    CHECK(!n.contains(a));
+    // bare address = host route
+    CHECK(parseCidr("10.20.0.5", n));
+    CHECK_EQ(n.prefix, 32);
+    parseIp("10.20.0.5", a);
+    CHECK(n.contains(a));
+    parseIp("10.20.0.6", a);
+    CHECK(!n.contains(a));
+    // v6 range; a v4 address never matches a v6 range
+    CHECK(parseCidr("fd00::/8", n));
+    parseIp("fd12:3456::1", a);
+    CHECK(n.contains(a));
+    parseIp("10.0.0.1", a);
+    CHECK(!n.contains(a));
+    CHECK(!parseCidr("10.0.0.0/33", n));
+    CHECK(!parseCidr("10.0.0.0/", n));
+    CHECK(!parseCidr("10.0.0.0/x", n));
+    CHECK(!parseCidr("::/129", n));
+
+    std::vector<IpNet> list;
+    std::string err;
+    CHECK(parseCidrList("10.0.0.0/8, 192.168.0.0/16\n fd00::/8", list, err));
+    CHECK_EQ(list.size(), (size_t)3);
+    CHECK(parseCidrList("", list, err)); // empty list is fine
+    list.clear();
+    CHECK(!parseCidrList("10.0.0.0/8,oops", list, err));
+    CHECK(err.find("oops") != std::string::npos);
+}
+
+TEST(netaddr_host_of_peer) {
+    CHECK_EQ(hostOfPeer("10.1.2.3:41234"), std::string("10.1.2.3"));
+    CHECK_EQ(hostOfPeer("[fd00::1]:41234"), std::string("fd00::1"));
+    CHECK_EQ(hostOfPeer("fd00::1"), std::string("fd00::1"));
+    CHECK_EQ(hostOfPeer("10.1.2.3"), std::string("10.1.2.3"));
+}
+
+TEST(netaddr_resolve_client_ip) {
+    std::vector<IpNet> none;
+    std::vector<IpNet> nets;
+    std::string err;
+    parseCidrList("10.89.0.0/16", nets, err);
+
+    // Loopback peer: forwarded headers are honoured, X-Real-IP first.
+    CHECK_EQ(resolveClientIp("127.0.0.1:5000", "203.0.113.9", "", none),
+             std::string("203.0.113.9"));
+    CHECK_EQ(resolveClientIp("[::1]:5000", "", "198.51.100.1, 203.0.113.9", none),
+             std::string("203.0.113.9"));
+    // Untrusted remote peer: headers ignored (cannot spoof past the limiter).
+    CHECK_EQ(resolveClientIp("10.89.0.7:5000", "203.0.113.9", "", none),
+             std::string("10.89.0.7"));
+    // Same peer inside AVB_TRUSTED_PROXIES: honoured.
+    CHECK_EQ(resolveClientIp("10.89.0.7:5000", "203.0.113.9", "", nets),
+             std::string("203.0.113.9"));
+    CHECK_EQ(resolveClientIp("10.89.0.7:5000", "", "203.0.113.9", nets),
+             std::string("203.0.113.9"));
+    // Garbage in the header never becomes a rate-limit key.
+    CHECK_EQ(resolveClientIp("10.89.0.7:5000", "evil\"key", "also bad", nets),
+             std::string("10.89.0.7"));
+    // Dual-stack listener reports v4 peers as mapped v6 — still recognised.
+    CHECK_EQ(resolveClientIp("[::ffff:10.89.0.7]:5000", "203.0.113.9", "", nets),
+             std::string("203.0.113.9"));
+    CHECK_EQ(resolveClientIp("[::ffff:127.0.0.1]:5000", "203.0.113.9", "", none),
+             std::string("203.0.113.9"));
+    // Unparseable peer (should not happen) passes through unchanged.
+    CHECK_EQ(resolveClientIp("?", "203.0.113.9", "", nets), std::string("?"));
+}
+
+// ---------------------------------------------------------------------------
+// util/fsutil.h — atomic, durable file replacement
+// ---------------------------------------------------------------------------
+#include "util/fsutil.h"
+
+#include <sys/stat.h>
+
+TEST(fsutil_write_file_atomic) {
+    std::string dir = "build/test-fsutil";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    std::string path = dir + "/state.json";
+    std::string err;
+
+    CHECK(writeFileAtomic(path, "{\"v\":1}", err, 0600));
+    CHECK_EQ(err, std::string());
+    {
+        std::ifstream f(path);
+        std::string s((std::istreambuf_iterator<char>(f)), {});
+        CHECK_EQ(s, std::string("{\"v\":1}"));
+    }
+    struct stat st{};
+    CHECK(::stat(path.c_str(), &st) == 0);
+    CHECK_EQ((int)(st.st_mode & 0777), 0600);
+    CHECK(!std::filesystem::exists(path + ".tmp")); // no staging leftovers
+
+    // Replacement is complete-or-nothing and keeps the earlier mode choice
+    // irrelevant: the new file carries the requested mode.
+    CHECK(writeFileAtomic(path, "{\"v\":2}", err, 0644));
+    {
+        std::ifstream f(path);
+        std::string s((std::istreambuf_iterator<char>(f)), {});
+        CHECK_EQ(s, std::string("{\"v\":2}"));
+    }
+
+    // Unwritable directory: error reported, nothing created.
+    CHECK(!writeFileAtomic("/proc/avb-no-such/state.json", "x", err));
+    CHECK(!err.empty());
+    std::filesystem::remove_all(dir);
+}

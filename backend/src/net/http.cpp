@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstring>
 
 namespace avb {
@@ -77,22 +78,47 @@ std::string urlDecode(const std::string& s) {
     return out;
 }
 
-bool HttpServer::listenAndServe(std::string& err) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+bool HttpServer::listen(std::string& err) {
+    // Accept an IPv4 or IPv6 literal. "::" gives a dual-stack socket that
+    // also accepts IPv4 clients (reported as ::ffff:a.b.c.d peers).
+    sockaddr_storage ss{};
+    socklen_t slen = 0;
+    in_addr a4{};
+    in6_addr a6{};
+    if (::inet_pton(AF_INET, mBindAddr.c_str(), &a4) == 1) {
+        auto* sa = reinterpret_cast<sockaddr_in*>(&ss);
+        sa->sin_family = AF_INET;
+        sa->sin_addr = a4;
+        sa->sin_port = htons(mPort);
+        slen = sizeof(sockaddr_in);
+    } else if (::inet_pton(AF_INET6, mBindAddr.c_str(), &a6) == 1) {
+        auto* sa = reinterpret_cast<sockaddr_in6*>(&ss);
+        sa->sin6_family = AF_INET6;
+        sa->sin6_addr = a6;
+        sa->sin6_port = htons(mPort);
+        slen = sizeof(sockaddr_in6);
+    } else {
+        err = "bad bind address \"" + mBindAddr +
+              "\" (expected an IPv4 or IPv6 literal, e.g. 0.0.0.0, "
+              "127.0.0.1 or ::)";
+        return false;
+    }
+
+    int fd = ::socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         err = "socket() failed";
         return false;
     }
     int one = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (ss.ss_family == AF_INET6) {
+        int off = 0; // dual-stack: "::" serves IPv4 clients too
+        ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+    }
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(mPort);
-    if (::bind(fd, (sockaddr*)&addr, sizeof addr) != 0) {
-        err = "bind() failed on port " + std::to_string(mPort) +
-              " (already in use?)";
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&ss), slen) != 0) {
+        err = "bind() failed on " + mBindAddr + ":" + std::to_string(mPort) +
+              " (" + std::strerror(errno) + ")";
         ::close(fd);
         return false;
     }
@@ -101,20 +127,45 @@ bool HttpServer::listenAndServe(std::string& err) {
         ::close(fd);
         return false;
     }
+    // Report the port actually bound (matters when 0 was requested).
+    sockaddr_storage bound{};
+    socklen_t blen = sizeof bound;
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &blen) == 0) {
+        mBoundPort = bound.ss_family == AF_INET6
+                         ? ntohs(reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port)
+                         : ntohs(reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
+    } else {
+        mBoundPort = mPort;
+    }
     mListenFd.store(fd);
+    return true;
+}
+
+void HttpServer::serve() {
+    int fd = mListenFd.load();
+    if (fd < 0) return; // stop() ran before serve(), or listen() never did
 
     while (!mStopping.load()) {
-        sockaddr_in peer{};
+        sockaddr_storage peer{};
         socklen_t plen = sizeof peer;
-        int cfd = ::accept(fd, (sockaddr*)&peer, &plen);
+        int cfd = ::accept4(fd, reinterpret_cast<sockaddr*>(&peer), &plen,
+                            SOCK_CLOEXEC);
         if (cfd < 0) {
             if (mStopping.load()) break;
             continue;
         }
-        char ip[INET_ADDRSTRLEN] = "?";
-        ::inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
-        std::string peerAddr =
-            std::string(ip) + ":" + std::to_string(ntohs(peer.sin_port));
+        char ip[INET6_ADDRSTRLEN] = "?";
+        std::string peerAddr;
+        if (peer.ss_family == AF_INET6) {
+            auto* p6 = reinterpret_cast<sockaddr_in6*>(&peer);
+            ::inet_ntop(AF_INET6, &p6->sin6_addr, ip, sizeof ip);
+            peerAddr = "[" + std::string(ip) + "]:" +
+                       std::to_string(ntohs(p6->sin6_port));
+        } else {
+            auto* p4 = reinterpret_cast<sockaddr_in*>(&peer);
+            ::inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof ip);
+            peerAddr = std::string(ip) + ":" + std::to_string(ntohs(p4->sin_port));
+        }
 
         timeval tv{30, 0};
         ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
@@ -124,14 +175,27 @@ bool HttpServer::listenAndServe(std::string& err) {
 
         mPool.post([this, cfd, peerAddr] { handleConnection(cfd, peerAddr); });
     }
+    // Whoever gets here first (us, or stop() running concurrently) takes the
+    // fd out of mListenFd; we always own the close.
+    mListenFd.exchange(-1);
     ::close(fd);
-    return true;
 }
 
 void HttpServer::stop() {
     mStopping.store(true);
     int fd = mListenFd.exchange(-1);
-    if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+    if (fd >= 0) ::shutdown(fd, SHUT_RDWR); // wakes accept(); serve() closes
+}
+
+void HttpServer::drain() {
+    for (auto& c : mClients.list()) {
+        if (c->fd < 0) continue;
+        if (c->busy.load()) continue; // let the in-flight response finish
+        // Idle keep-alive: recv() returns 0 and the thread exits. WebSocket
+        // streams normally close themselves (1001) once told to stop; this
+        // also frees one blocked in send() towards a stalled client.
+        ::shutdown(c->fd, SHUT_RDWR);
+    }
 }
 
 bool HttpServer::readRequest(int fd, std::string& buffered, HttpRequest& req,
@@ -254,7 +318,7 @@ void HttpServer::writeResponse(int fd, const HttpResponse& resp, bool close,
 }
 
 void HttpServer::handleConnection(int fd, const std::string& addr) {
-    auto client = mClients.add(addr, "http");
+    auto client = mClients.add(addr, "http", fd);
     std::string buffered;
 
     while (!mStopping.load()) {
@@ -271,6 +335,7 @@ void HttpServer::handleConnection(int fd, const std::string& addr) {
             break;
         }
         client->messages++;
+        client->busy.store(true);
 
         // WebSocket upgrade — hand the socket to the API layer.
         if (toLower(req.header("upgrade")) == "websocket" && mUpgrade) {
@@ -294,6 +359,7 @@ void HttpServer::handleConnection(int fd, const std::string& addr) {
             resp.body = "{\"error\":\"no handler\"}";
         }
         writeResponse(fd, resp, close, client.get());
+        client->busy.store(false);
         if (close) break;
     }
 

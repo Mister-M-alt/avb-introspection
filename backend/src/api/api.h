@@ -14,15 +14,18 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../auth/auth.h"
 #include "../engine/engine.h"
 #include "../net/http.h"
 #include "../sec/flowguard.h"
 #include "../store/store.h"
+#include "../util/netaddr.h"
 #include "../util/ratelimit.h"
 
 namespace avb {
@@ -36,6 +39,16 @@ public:
                 std::shared_ptr<ClientInfo> client);
     /** WebSocket upgrade — takes ownership of fd, always. */
     bool handleUpgrade(HttpRequest& req, int fd);
+
+    /** Reverse proxies whose X-Real-IP / X-Forwarded-For is believed
+     *  (AVB_TRUSTED_PROXIES). Loopback peers are always trusted. */
+    void setTrustedProxies(std::vector<IpNet> nets) {
+        mTrustedProxies = std::move(nets);
+    }
+    /** Shutdown: every WebSocket stream closes (1001 Going Away) within
+     *  its next poll interval instead of holding its thread until the
+     *  client disconnects. */
+    void stop() { mStopping.store(true); }
 
 private:
     /** Resolved caller identity: who, which role, which tenant domain. */
@@ -52,6 +65,9 @@ private:
                   std::shared_ptr<ClientInfo> client, const std::string& ip,
                   std::string& actor, Caller& caller);
     void handleStatic(HttpRequest& req, HttpResponse& resp);
+    /** Client address for rate limiting / flow monitoring (see
+     *  resolveClientIp in util/netaddr.h). */
+    std::string clientIp(const HttpRequest& req) const;
 
     /** Session lookup with tenancy enforcement: nullptr when the id does not
      *  exist in the caller's domain (indistinguishable from absent). */
@@ -115,6 +131,8 @@ private:
     double mRateRps = 30.0, mRateBurst = 90.0;    // AVB_RATE_RPS / AVB_RATE_BURST
     double mLoginRps = 0.5, mLoginBurst = 6.0;    // AVB_LOGIN_RPS / AVB_LOGIN_BURST
     bool mRegistrationDisabled = false;           // AVB_DISABLE_REGISTRATION=1
+    std::vector<IpNet> mTrustedProxies;           // AVB_TRUSTED_PROXIES
+    std::atomic<bool> mStopping{false};
 
     // SE-7: flow sampling + anomaly detection.
     FlowGuard mGuard;

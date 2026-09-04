@@ -10,6 +10,7 @@
 #include <iterator>
 #include <sstream>
 
+#include "../util/fsutil.h"
 #include "../util/json.h"
 
 namespace avb {
@@ -69,20 +70,8 @@ bool Auth::save(std::string& err) {
     }
     w.endArr().endObj();
 
-    std::string tmp = mPath + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::trunc);
-        if (!f) {
-            err = "cannot write " + tmp;
-            return false;
-        }
-        f << w.str();
-    }
-    if (std::rename(tmp.c_str(), mPath.c_str()) != 0) {
-        err = "cannot replace " + mPath;
-        return false;
-    }
-    return true;
+    // Password hashes: owner-only file, written crash-safely (fsync+rename).
+    return writeFileAtomic(mPath, w.str(), err, 0600);
 }
 
 bool Auth::registerUser(const std::string& username,
