@@ -130,11 +130,14 @@ jobs:
             -keyout /tmp/key.pem -out /tmp/cert.pem 2>/dev/null
           sed 's/__SERVER_NAME__/avb.example.com/; s#__APP_UPSTREAM__#127.0.0.1:8342#; s#__CERT__#/etc/nginx/certs/cert.pem#; s#__KEY__#/etc/nginx/certs/key.pem#; s/__MAX_UPLOAD__/1024m/' \
             deploy/nginx.production.conf > /tmp/nginx.production.conf
-          for f in deploy/nginx.conf deploy/nginx.scale.conf /tmp/nginx.production.conf; do
+          # Absolute paths on purpose: a relative bind-mount source that does not
+          # exist is silently created as an empty directory by Docker.
+          for f in "$PWD/deploy/nginx.conf" "$PWD/deploy/nginx.scale.conf" /tmp/nginx.production.conf; do
             echo "== $f"
+            test -f "$f"
             docker run --rm --add-host app:127.0.0.1 --add-host acme:127.0.0.1 \
               --add-host globex:127.0.0.1 --add-host initech:127.0.0.1 \
-              -v "$PWD/$f":/etc/nginx/conf.d/default.conf:ro \
+              -v "$f":/etc/nginx/conf.d/default.conf:ro \
               -v /tmp/cert.pem:/etc/nginx/certs/cert.pem:ro -v /tmp/key.pem:/etc/nginx/certs/key.pem:ro \
               nginx:1.27-alpine nginx -t
           done
