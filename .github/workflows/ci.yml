@@ -54,9 +54,99 @@ jobs:
           path: build/e2e-*.png
           if-no-files-found: ignore
 
-  docker:
+  # The deployment artifacts are exercised, not just built: the image runs
+  # and reports healthy, stops cleanly on SIGTERM, both compose stacks parse,
+  # the single stack serves through nginx, every nginx template passes
+  # `nginx -t`, and the systemd unit / nftables template / install script
+  # are syntax-checked.
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # git describe needs the tags
+
+      - name: Lint the Dockerfile
+        run: docker run --rm -i hadolint/hadolint < Dockerfile
+
       - name: Docker build (BE-3)
-        run: docker build -t avb-introspection .
+        run: |
+          docker build --build-arg VERSION="$(git describe --tags --always --dirty)" \
+            -t avb-introspection .
+          docker run --rm avb-introspection --version
+
+      - name: Container smoke test — healthy, serves, stops cleanly
+        run: |
+          docker run -d --name avb -p 127.0.0.1:8342:8342 \
+            -e AVB_ADMIN_USER=admin -e AVB_ADMIN_PASSWORD=ci-pass-12345 \
+            --cap-drop=ALL --security-opt no-new-privileges --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m avb-introspection
+          for i in $(seq 1 30); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' avb)
+            [ "$s" = healthy ] && break
+            sleep 2
+          done
+          echo "health: $s"; docker logs avb
+          [ "$s" = healthy ]
+          curl -fsS http://127.0.0.1:8342/api/bootstrap | grep -q '"needs_admin":false'
+          # graceful stop: exit 0 well inside the grace period
+          start=$(date +%s); docker stop -t 60 avb; end=$(date +%s)
+          echo "stop took $((end-start))s"
+          [ "$(docker inspect -f '{{.State.ExitCode}}' avb)" = 0 ]
+          [ $((end-start)) -lt 10 ]
+          docker rm avb
+
+      - name: Compose stacks parse
+        run: |
+          for t in app acme globex initech; do
+            sed 's/CHANGE-ME-generate-a-strong-one/ci-pass-12345/' deploy/env/$t.env.example > deploy/env/$t.env
+          done
+          docker compose -f deploy/docker-compose.yml config -q
+          docker compose -f deploy/docker-compose.scale.yml config -q
+
+      - name: Single-instance stack serves through nginx
+        run: |
+          # same VERSION as the build step, so compose reuses the cached image
+          export AVB_VERSION="$(git describe --tags --always --dirty)"
+          docker compose -f deploy/docker-compose.yml up -d
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1/api/bootstrap | grep -q '"needs_admin":false'; then ok=1; break; fi
+            sleep 2
+          done
+          docker compose -f deploy/docker-compose.yml ps
+          docker compose -f deploy/docker-compose.yml logs app
+          [ "$ok" = 1 ]
+          # the app itself is not published — only nginx is
+          ! curl -s -m 3 http://127.0.0.1:8342/api/bootstrap
+          # static asset is gzip-compressed by nginx, API JSON is not
+          curl -sS -o /dev/null -D - -H 'Accept-Encoding: gzip' http://127.0.0.1/app.js | grep -qi 'content-encoding: gzip'
+          ! curl -sS -o /dev/null -D - -H 'Accept-Encoding: gzip' http://127.0.0.1/api/bootstrap | grep -qi 'content-encoding: gzip'
+          docker compose -f deploy/docker-compose.yml down -v
+
+      - name: nginx -t on every shipped config
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ci \
+            -keyout /tmp/key.pem -out /tmp/cert.pem 2>/dev/null
+          sed 's/__SERVER_NAME__/avb.example.com/; s#__APP_UPSTREAM__#127.0.0.1:8342#; s#__CERT__#/etc/nginx/certs/cert.pem#; s#__KEY__#/etc/nginx/certs/key.pem#; s/__MAX_UPLOAD__/1024m/' \
+            deploy/nginx.production.conf > /tmp/nginx.production.conf
+          for f in deploy/nginx.conf deploy/nginx.scale.conf /tmp/nginx.production.conf; do
+            echo "== $f"
+            docker run --rm --add-host app:127.0.0.1 --add-host acme:127.0.0.1 \
+              --add-host globex:127.0.0.1 --add-host initech:127.0.0.1 \
+              -v "$PWD/$f":/etc/nginx/conf.d/default.conf:ro \
+              -v /tmp/cert.pem:/etc/nginx/certs/cert.pem:ro -v /tmp/key.pem:/etc/nginx/certs/key.pem:ro \
+              nginx:1.27-alpine nginx -t
+          done
+
+      - name: systemd unit, nftables template, install script
+        run: |
+          sudo apt-get update && sudo apt-get install -y nftables shellcheck
+          sudo install -D -m 0755 /bin/true /opt/avb-introspection/avb-introspectd
+          sudo cp deploy/avb-introspectd.service /etc/systemd/system/
+          systemd-analyze verify avb-introspectd.service
+          sed 's/__NGINX_IP__/127.0.0.1/; s/__BASTION_IP__/10.40.0.5/; s/__DNS_IP__/10.40.0.53/; s/__NTP_IP__/10.40.0.123/' \
+            deploy/firewall.nft > /tmp/firewall.nft
+          sudo nft -c -f /tmp/firewall.nft
+          bash -n deploy/install.sh
+          shellcheck -S warning deploy/install.sh scripts/integration_test.sh

@@ -1,31 +1,110 @@
 # SPDX-FileCopyrightText: 2026 Kebag-Logic
 # SPDX-License-Identifier: MIT
 #
-# Remote deployment: nginx in front of the backend (SE-4).
-#   docker compose -f deploy/docker-compose.yml up --build
-# The UI is then reachable on port 80 of this host; pcaps, sessions and
-# accounts persist in the avb-data volume (BE-8). For TLS, mount your
-# certificates and enable the 443 server block in nginx.conf.
+# Remote deployment: nginx in front of one backend instance (SE-4). This is
+# deployment Level 2 in docs/DEPLOYMENT.md.
+#
+#   cp deploy/env/app.env.example deploy/env/app.env && chmod 600 deploy/env/app.env
+#   $EDITOR deploy/env/app.env                      # admin credentials
+#   docker compose -f deploy/docker-compose.yml up --build -d
+#   podman-compose -f deploy/docker-compose.yml up -d
+#
+# The UI is then reachable on port 80 of this host (443 once you enable the
+# TLS block in nginx.conf); pcaps, sessions and accounts persist in the
+# avb-data volume (BE-8). The env file is required on purpose: without an
+# AVB_ADMIN_USER the first person to reach the login page becomes the admin.
+#
+# Only nginx is published. The backend sits on an internal network with no
+# gateway (the container stand-in for the systemd unit's IPAddressDeny=any),
+# runs read-only with every capability dropped, and is resource-capped.
+# Rationale and the tuning knobs: docs/CONTAINER.md §6 and §8.
+#
+# ONE instance per data volume, always. Do not `--scale app=2` — see
+# docs/CONTAINER.md §1; to grow, shard with deploy/docker-compose.scale.yml.
 
 services:
   app:
-    build: ..
+    build:
+      context: ..
+      args:
+        VERSION: ${AVB_VERSION:-dev}   # e.g. AVB_VERSION=$(git describe --tags --always)
+    image: avb-introspection:latest
+    restart: unless-stopped
+    env_file:
+      - ./env/app.env
+    environment:
+      # nginx is not loopback from inside this container, so the app must be
+      # told which peers' X-Real-IP / X-Forwarded-For to believe — otherwise
+      # every per-IP limit (login brute-force throttle, FlowGuard) keys on the
+      # proxy's address and one bad client can lock everyone out of login.
+      # The backend network is internal and the port is not published, so the
+      # only possible peers are containers of this stack; trusting the private
+      # ranges is exact here. Narrow it to your network's subnet if you pin
+      # one under `networks:` below.
+      AVB_TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     volumes:
       - avb-data:/data
-    restart: unless-stopped
-    # Only nginx is exposed; the backend stays on the compose network.
+    # Uploads are buffered in RAM at roughly 3x their size; the default
+    # --max-upload-mb 1024 (matched by client_max_body_size in nginx.conf)
+    # therefore needs a ~4g cap. Lower both together for a smaller box.
+    mem_limit: 4g
+    mem_reservation: 1g
+    cpus: 2.0
+    pids_limit: 512
+    cap_drop: [ALL]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    # SIGTERM drains gracefully (streams close, in-flight requests finish);
+    # allow longer than your largest upload takes to validate.
+    stop_grace_period: 60s
+    networks: [backend]
+    healthcheck:
+      # Same probe as the image's HEALTHCHECK, repeated here because Podman's
+      # default OCI image format drops it at build time. Folded block scalar
+      # (>-) on purpose: a double-quoted YAML scalar would turn \r\n into real
+      # control characters before printf saw them. bash is explicit because
+      # /bin/sh is dash and has no /dev/tcp.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8342 &&
+          printf 'GET /api/bootstrap HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          head -1 <&3 | grep -q ' 200 '
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
   nginx:
     image: nginx:1.27-alpine
+    restart: unless-stopped
     ports:
       - "80:80"
       # - "443:443"          # enable together with the TLS server block
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       # - ./certs:/etc/nginx/certs:ro
-    depends_on:
-      - app
-    restart: unless-stopped
+    # Plain list form: enough for name resolution at startup, and identical
+    # under docker compose and podman-compose (the `condition:` long form is
+    # not reliably supported by the latter). nginx retries an upstream that
+    # is still restoring sessions on its own.
+    depends_on: [app]
+    networks: [edge, backend]
+
+networks:
+  edge:
+  backend:
+    # No gateway: the backend can reach nothing but its proxy.
+    internal: true
+    # To trust exactly one subnet instead of the private ranges, pin it:
+    # ipam:
+    #   config:
+    #     - subnet: 10.201.0.0/24      # then AVB_TRUSTED_PROXIES=10.201.0.0/24
 
 volumes:
   avb-data:

@@ -6,3 +6,6 @@ __pycache__/
 *.pcap
 *.pcapng
 .gitprep
+# Per-shard admin credentials for deploy/docker-compose.scale.yml — the
+# .example templates are tracked, the filled-in .env files must not be.
+deploy/env/*.env

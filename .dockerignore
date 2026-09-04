@@ -1,5 +1,17 @@
+# Build context = what COPY may touch: Makefile, backend/, frontend/ and
+# docs/API.md. Everything else only slows the context upload.
 .git
+.github
+.claude
+.gitprep
 build
 data
 testdata
+deploy
+scripts
+tools
+docs/img
+*.md
+!docs/API.md
 *.pcap
+*.pcapng

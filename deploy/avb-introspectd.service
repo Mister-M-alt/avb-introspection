@@ -1,17 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Kebag-Logic
 # SPDX-License-Identifier: MIT
 #
-# systemd unit for the backend (VM/bare-metal deployments fronted by an
-# nginx on another machine — see deploy/nginx.conf).
+# systemd unit for the backend (VM/bare-metal deployments fronted by nginx —
+# see deploy/nginx.production.conf, or deploy/nginx.conf for a lab).
 #
-# Install:
+# Install (or run deploy/install.sh from a release bundle, which does this):
 #   sudo useradd --system --home /var/lib/avb-introspection avb
-#   sudo mkdir -p /opt/avb-introspection /var/lib/avb-introspection
+#   sudo mkdir -p /opt/avb-introspection
 #   sudo cp build/avb-introspectd /opt/avb-introspection/
 #   sudo cp -r frontend /opt/avb-introspection/
-#   sudo chown -R avb:avb /var/lib/avb-introspection
 #   sudo cp deploy/avb-introspectd.service /etc/systemd/system/
+#   sudo install -d -m 0750 /etc/avb-introspection
+#   sudo $EDITOR /etc/avb-introspection/env       # see below; chmod 0600
 #   sudo systemctl enable --now avb-introspectd
+# The data directory is created and owned for you (StateDirectory=).
 
 [Unit]
 Description=AVB Introspection backend (Milan protocol analyzer)
@@ -20,41 +22,53 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=exec
 User=avb
 Group=avb
-# Admin provisioning: the account is created as admin on first start (or
-# promoted if it already exists — the password is ignored in that case).
-# Prefer a drop-in (systemctl edit avb-introspectd) or an EnvironmentFile
-# with mode 0600 over editing this unit, so the password stays out of the
-# package:
-#   Environment=AVB_ADMIN_USER=alex
-#   Environment=AVB_ADMIN_PASSWORD=change-me
-# Expose the API on loopback only — nginx (which terminates TLS) is the sole
-# public listener. The app also refuses to trust X-Real-IP unless the peer is
-# loopback, so a remote client cannot forge its source IP. Bind an off-box
-# address here only if nginx runs on another machine on a trusted segment.
+# All configuration comes from /etc/avb-introspection/env (KEY=VALUE lines,
+# mode 0600, root-owned). It is optional (leading "-") so the unit also runs
+# without one. Unlike Environment= in a drop-in, an EnvironmentFile does no
+# specifier expansion, so a password containing % or $ survives intact.
 #
-# Harden the deployment against brute force / open signup on exposed installs:
-#   Environment=AVB_DISABLE_REGISTRATION=1     # admins/owners create accounts
-#   Environment=AVB_RATE_RPS=30                # per non-admin user (default 30)
-#   Environment=AVB_RATE_BURST=90              # burst (default 90)
+#   AVB_ADMIN_USER=alex                 # created as admin on first start, or
+#   AVB_ADMIN_PASSWORD=change-me        # promoted if it exists (password then ignored)
+#   AVB_DISABLE_REGISTRATION=1          # admins/owners create accounts
+#   AVB_RATE_RPS=30 / AVB_RATE_BURST=90 # per non-admin user (defaults)
+#   AVB_LOGIN_RPS=0.5 / AVB_LOGIN_BURST=6   # per client IP on login/register
+#   AVB_TRUSTED_PROXIES=10.20.0.5       # ONLY if nginx runs on ANOTHER host:
+#                                       # the app believes X-Real-IP from
+#                                       # loopback and these peers, nobody else
+EnvironmentFile=-/etc/avb-introspection/env
+# Listen on loopback only — nginx (which terminates TLS) is the sole public
+# listener. If nginx runs on another machine on a trusted segment, bind the
+# app-VLAN address instead (e.g. --bind 10.30.0.10), widen IPAddressAllow=
+# below to that nginx host, and set AVB_TRUSTED_PROXIES to it.
 ExecStart=/opt/avb-introspection/avb-introspectd \
+    --bind 127.0.0.1 \
     --port 8342 \
     --data /var/lib/avb-introspection \
     --frontend /opt/avb-introspection/frontend
 Restart=on-failure
 RestartSec=2
+# SIGTERM starts a graceful stop: listener closed, WebSocket streams sent a
+# 1001 close frame, in-flight requests finished, then exit 0. A second SIGTERM
+# exits at once. Allow longer than your largest upload takes to validate.
+KillSignal=SIGTERM
+TimeoutStopSec=60
 
 # ── Hardening (see docs/SECURITY.md §3) ──────────────────────────────────
 # The goal: a full compromise of the process can touch nothing but its own
 # data directory and cannot open an outbound connection.
 #
-# If an admin points the pcap library at a path outside the data dir
-# (Admin → Storage), add that path to ReadWritePaths too, e.g.:
-#   ReadWritePaths=/var/lib/avb-introspection /mnt/captures
-# otherwise ProtectSystem=strict makes the new root read-only and the change
-# is rejected with a "not writable by the service" error.
+# StateDirectory= creates /var/lib/avb-introspection owned by avb and makes
+# it the one writable path under ProtectSystem=strict. If an admin points
+# the pcap library at a path outside it (Admin → Storage), add that path to
+# ReadWritePaths= too, e.g.:
+#   ReadWritePaths=/mnt/captures
+# otherwise the new root is read-only and the change is rejected with a
+# "not writable by the service" error.
+StateDirectory=avb-introspection
+StateDirectoryMode=0700
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/avb-introspection
@@ -83,9 +97,9 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # but loopback — it cannot phone home even if the host firewall is missing.
 # This ALSO blocks inbound from off-box, which is what you want when nginx runs
 # on THIS host (the recommended layout: nginx terminates TLS and proxies to
-# 127.0.0.1:8342). If you expose :8342 directly (no local nginx) or nginx runs
-# on another machine, add that source so users/proxy can still reach it, e.g.:
-#   IPAddressAllow=localhost 192.168.0.0/16
+# 127.0.0.1:8342). If nginx runs on another machine, add that host (and change
+# --bind above), e.g.:
+#   IPAddressAllow=localhost 10.20.0.5
 IPAddressAllow=localhost
 IPAddressDeny=any
 # seccomp allow-list: @reboot, @swap, @module, @raw-io, @mount, … are denied.
@@ -96,6 +110,10 @@ SystemCallArchitectures=native
 UMask=0077
 
 # ── Resource quotas — one tenant or a decode storm cannot down the host ──
+# Uploads are buffered in RAM at roughly 3x their size: with the default
+# --max-upload-mb 1024 a 2G cap can be hit by a single large upload. Either
+# raise MemoryMax or add --max-upload-mb 512 to ExecStart (and lower nginx's
+# client_max_body_size to match). docs/CONTAINER.md §8 has the arithmetic.
 CPUQuota=200%
 MemoryHigh=1536M
 MemoryMax=2G
